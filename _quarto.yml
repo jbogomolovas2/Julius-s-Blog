@@ -1,11 +1,14 @@
 project:
   type: website
   output-dir: docs
-
+  resources:
+    - google*.html
 website:
   title: "Julius's Blog"
   description: "Data Science, Swimming Analytics, and R Programming"
-  site-url: https://jbogomolovas2.github.io/julius-blog/
+  site-url: https://jbogomolovas2.github.io/Julius-s-Blog/
+  open-graph: true
+  twitter-card: true
   
   navbar:
     right:
