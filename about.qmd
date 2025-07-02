@@ -1,0 +1,20 @@
+---
+title: "About"
+image: profile.jpg
+about:
+  template: jolla
+  links:
+    - icon: linkedin
+      text: LinkedIn
+      href: https://linkedin.com/in/julius-bogomolovas-93222a19/
+    - icon: github
+      text: Github
+      href: https://github.com/jbogomolovas2
+    - icon: mortarboard
+      text: Google Scholar
+      href: https://scholar.google.com/citations?user=sIQePZ0AAAAJ&hl=lt&oi=ao
+---
+
+**Julius's blog**
+
+Data analysis shenanigans mostly in `R`

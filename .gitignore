@@ -1,0 +1,23 @@
+.Rproj.user
+.Rhistory
+.RData
+.Ruserdata
+
+/.quarto/
+
+# Quarto
+/.quarto/
+_freeze/
+_book/
+
+# Python (if you use Python chunks)
+__pycache__/
+.ipynb_checkpoints/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Other
+*.log
+.env_site/
