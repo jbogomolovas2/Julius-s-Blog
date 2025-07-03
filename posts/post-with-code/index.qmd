@@ -142,7 +142,7 @@ You can load it directly in `R`:
 
 ```{r}
 #| eval: false
-final_tbl <- read.csv("https://jbogomolovas2.github.io/julius-blog/posts/post-with-code/all_swim_laps.csv")
+final_tbl <- read.csv("https://github.com/jbogomolovas2/Julius-s-Blog/blob/master/posts/post-with-code/all_swim_laps.csv")
 ```
 
 ```{r}

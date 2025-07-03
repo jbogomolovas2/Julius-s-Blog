@@ -3,6 +3,12 @@
 .RData
 .Ruserdata
 
+.RData
+.RDataTmp
+.Rhistory
+.Rproj.user/
+*.Rproj
+
 /.quarto/
 
 # Quarto
@@ -21,3 +27,5 @@ Thumbs.db
 # Other
 *.log
 .env_site/
+.RDataTmp
+*.RDataTmp
