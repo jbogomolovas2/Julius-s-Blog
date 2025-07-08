@@ -26,6 +26,9 @@
 
 
 
+<section id="cherry-blossom-day-prediction" class="level2">
+<h2 class="anchored" data-anchor-id="cherry-blossom-day-prediction">Cherry Blossom day prediction</h2>
+<p>So earlier this year I participated in <a href="https://competition.statistics.gmu.edu/"><strong>International Cherry Blossom Prediction Competition</strong></a><strong>,</strong> which invites you to predict this years bloom date of cherry trees in 5 different locations based on provided historical bloom dates provided and any data you dig out. Now that cherry trees bloomed long time ago, I am sharing my entry. As good ideas come after, I enhanced last modelling step by introducing State-space framework into GAM model, allowing to deal with observation poor</p>
 <p>Lets load all required packages.</p>
 <div class="cell">
 <div class="sourceCode cell-code" id="cb1" style="background: #f1f3f5;"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb1-1"><span class="co" style="color: #5E5E5E;
@@ -65,13 +68,10 @@ font-style: inherit;">library</span>(mvgam)</span>
 background-color: null;
 font-style: inherit;">library</span>(tibble)</span></code></pre></div>
 </div>
-<section id="cherry-blossom-day-prediction" class="level2">
-<h2 class="anchored" data-anchor-id="cherry-blossom-day-prediction">Cherry Blossom day prediction</h2>
-<p>So earlier this year I participated in <a href="https://competition.statistics.gmu.edu/"><strong>International Cherry Blossom Prediction Competition</strong></a><strong>,</strong> which invites you to predict this years bloom date of cherry trees in 5 different locations based on provided historical bloom dates provided and any data you dig out. Now that cherry trees bloomed long time ago, I am sharing my entry. As good ideas come after, I enhanced last modelling step by introducing State-space framework into GAM model, allowing to deal with observation poor time series in several of locations.</p>
 <section id="weather-data-import" class="level3">
 <h3 class="anchored" data-anchor-id="weather-data-import">1. Weather Data Import</h3>
-<p>Let’s start by uploading historical weather data for studied locations. I found that NASA POWER project provides best continuous weather records using <code>nasapower</code> <span class="citation" data-cites="nasapower">(Sparks 2018)</span> package. Original records from nearby stations are riddled with missing data. So we download: Tmax, Tmin, Tmean and Precipitation from 1981-01-01 (earliest date available) until the most recent.</p>
-<p>Here’s how we fetch the data for Kyoto as an example:</p>
+<p>Let’s start by uploading historical weather data for studied locations. I found that NASA POWER project provides best continuous weather records using <code>nasapower</code> <span class="citation" data-cites="nasapower">(Sparks 2018)</span> package. Original records from nearby stations are riddled with missing data. So I download: Tmax, Tmin, Tmean and Precipitation from 1981-01-01 (earliest date available) until the most recent.</p>
+<p>Here’s how I fetch the data for Kyoto as an example:</p>
 <div class="cell">
 <div class="sourceCode cell-code" id="cb2" style="background: #f1f3f5;"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb2-1"><span class="co" style="color: #5E5E5E;
 background-color: null;
@@ -124,7 +124,7 @@ background-color: null;
 font-style: inherit;">"daily"</span></span>
 <span id="cb2-8">)</span></code></pre></div>
 </div>
-<p>We repeat this process for all five cherry blossom locations: Kyoto (Japan), Liestal-Weideli (Switzerland), Washington DC (USA), Vancouver (Canada), and New York City (USA).</p>
+<p>I repeat this process for all five cherry blossom locations: Kyoto (Japan), Liestal-Weideli (Switzerland), Washington DC (USA), Vancouver (Canada), and New York City (USA).</p>
 <div class="callout callout-style-default callout-note callout-titled">
 <div class="callout-header d-flex align-content-center" data-bs-toggle="collapse" data-bs-target=".callout-1-contents" aria-controls="callout-1" aria-expanded="false" aria-label="Toggle callout">
 <div class="callout-icon-container">
@@ -345,8 +345,8 @@ font-style: inherit;">"daily"</span></span>
 </section>
 <section id="calculating-daily-weather-anomalies" class="level3">
 <h3 class="anchored" data-anchor-id="calculating-daily-weather-anomalies">2. Calculating Daily Weather Anomalies</h3>
-<p>Now let’s create daily anomalies. We assume that if weather conditions were identical, cherry blossoms would occur on the same day every year. By computing daily anomalies, we partially normalize our variables across different locations.</p>
-<p>First, we define a function to calculate these anomalies:</p>
+<p>Now let’s create daily anomalies. I assume that if weather conditions were identical, cherry blossoms would occur on the same day every year. By computing daily anomalies, I partially normalize our variables across different locations.</p>
+<p>First, I define a function to calculate these anomalies:</p>
 <div class="cell">
 <div class="sourceCode cell-code" id="cb4" style="background: #f1f3f5;"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb4-1"><span class="co" style="color: #5E5E5E;
 background-color: null;
@@ -552,7 +552,7 @@ background-color: null;
 font-style: inherit;">return</span>(result)</span>
 <span id="cb4-38">}</span></code></pre></div>
 </div>
-<p>We then apply this function to each location’s weather data. Here’s an example for New York:</p>
+<p>I then apply this function to each location’s weather data. Here’s an example for New York:</p>
 <div class="cell">
 <div class="sourceCode cell-code" id="cb5" style="background: #f1f3f5;"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb5-1"><span class="co" style="color: #5E5E5E;
 background-color: null;
@@ -642,7 +642,7 @@ font-style: inherit;">"Kyoto, Japan"</span></span></code></pre></div>
 </div>
 </div>
 </div>
-<p>Finally, we combine all the anomaly data into a single dataset:</p>
+<p>Finally, I combine all the anomaly data into a single dataset:</p>
 <div class="cell">
 <div class="sourceCode cell-code" id="cb7" style="background: #f1f3f5;"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb7-1"><span class="co" style="color: #5E5E5E;
 background-color: null;
@@ -671,7 +671,7 @@ font-style: inherit;">$</span>YYYYMMDD), ]</span></code></pre></div>
 </section>
 <section id="importing-and-processing-cherry-blossom-data" class="level3">
 <h3 class="anchored" data-anchor-id="importing-and-processing-cherry-blossom-data">3. Importing and Processing Cherry Blossom Data</h3>
-<p>Next, we import and combine the cherry blossom data. We filter for records from 1981 onward to ensure the dates match our weather data range:</p>
+<p>Next, I import and combine the cherry blossom data. I filter for records from 1981 onward to ensure the dates match our weather data range:</p>
 <div class="cell">
 <div class="sourceCode cell-code" id="cb8" style="background: #f1f3f5;"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb8-1"><span class="co" style="color: #5E5E5E;
 background-color: null;
@@ -1045,7 +1045,7 @@ font-style: inherit;">print</span>(year_summary_NY_individual)</span></code></pr
 </div>
 </div>
 </div>
-<p>Now we create augmented New York data using the earliest bloom date for each year:</p>
+<p>Now I create augmented New York data using the earliest bloom date for each year:</p>
 <div class="cell">
 <div class="sourceCode cell-code" id="cb13" style="background: #f1f3f5;"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb13-1"><span class="co" style="color: #5E5E5E;
 background-color: null;
@@ -1152,7 +1152,7 @@ font-style: inherit;">$</span>year), ]</span></code></pre></div>
 </section>
 <section id="analyzing-blossom-data" class="level3">
 <h3 class="anchored" data-anchor-id="analyzing-blossom-data">5. Analyzing Blossom Data</h3>
-<p>For effective modeling, we need a timeframe that aligns with the natural cherry blossom cycle rather than arbitrary calendar years. Let’s analyze our blossom date distribution to identify the optimal starting point for our “cherry year.”</p>
+<p>For effective modeling, I need a timeframe that aligns with the natural cherry blossom cycle rather than arbitrary calendar years. Let’s analyze our blossom date distribution to identify the optimal starting point for our “cherry year.”</p>
 <div class="cell">
 <div class="sourceCode cell-code" id="cb14" style="background: #f1f3f5;"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb14-1"><span class="co" style="color: #5E5E5E;
 background-color: null;
@@ -1223,12 +1223,12 @@ font-style: inherit;">print</span>(blossom_summary)</span></code></pre></div>
 5 washingtondc    74  86       91    95   101    27</code></pre>
 </div>
 </div>
-<p>The maximum third quartile (Q3) at day 100 represents when 75% of historical blooms have occurred in late–bloomer location—effectively marking the end of the bloom season across locations. While we could theoretically calculate predictors from one recorded bloom date to the next, this creates a circular dependency: to predict next year’s bloom date, we’d need to know it already to determine when to stop accumulating our weather predictors. By using day 100 as our universal cutoff, we establish a “cherry year” that runs from April 10 to April 9, nicely matching historical bloom cycles.</p>
+<p>The maximum third quartile (Q3) at day 100 represents when 75% of historical blooms have occurred in late–bloomer location—effectively marking the end of the bloom season across locations. While I could theoretically calculate predictors from one recorded bloom date to the next, this creates a circular dependency: to predict next year’s bloom date, we’d need to know it already to determine when to stop accumulating our weather predictors. By using day 100 as our universal cutoff, I establish a “cherry year” that runs from April 10 to April 9, nicely matching historical bloom cycles.</p>
 </section>
 <section id="building-rolling-sum-predictors" class="level3">
 <h3 class="anchored" data-anchor-id="building-rolling-sum-predictors">6. Building Rolling Sum Predictors</h3>
-<p>In this section, we create predictors that capture the cumulative effect of weather anomalies over a 30-day period, which we hypothesize will influence the timing of cherry blossom.</p>
-<p>First, we convert to data.table and compute 30-day rolling sums for each anomaly type. Here’s an example for temperature anomalies:</p>
+<p>In this section, I create predictors that capture the cumulative effect of weather anomalies over a 30-day period, which Ihypothesize will influence the timing of cherry blossom.</p>
+<p>First, Iconvert to data.table and compute 30-day rolling sums for each anomaly type. Here’s an example for temperature anomalies:</p>
 <div class="cell">
 <div class="sourceCode cell-code" id="cb16" style="background: #f1f3f5;"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb16-1"><span class="co" style="color: #5E5E5E;
 background-color: null;
@@ -1479,7 +1479,7 @@ font-style: inherit;">=</span> location]</span></code></pre></div>
 </div>
 </div>
 </div>
-<p>Next, we create a “cherry year” that aligns with the bloom cycle. Based on our analysis, we start each cherry year on April 10 (day 100):</p>
+<p>Next, I create a “cherry year” that aligns with the bloom cycle. Based on our analysis, I start each cherry year on April 10 (day 100):</p>
 <div class="cell">
 <div class="sourceCode cell-code" id="cb18" style="background: #f1f3f5;"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb18-1"><span class="co" style="color: #5E5E5E;
 background-color: null;
@@ -1538,7 +1538,7 @@ font-style: inherit;">-</span> <span class="dv" style="color: #AD0000;
 background-color: null;
 font-style: inherit;">99</span>))]</span></code></pre></div>
 </div>
-<p>Finally, we create a streamlined dataset containing only the rolling sum predictors:</p>
+<p>Finally, I create a streamlined dataset containing only the rolling sum predictors:</p>
 <div class="cell">
 <div class="sourceCode cell-code" id="cb19" style="background: #f1f3f5;"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb19-1">small_anomaly_df <span class="ot" style="color: #003B4F;
 background-color: null;
@@ -1559,7 +1559,7 @@ font-style: inherit;">c</span>(DOY, LON, LAT, YEAR, MM, DD, T2M, T2M_MAX, T2M_MI
 <div class="cell">
 <div class="sourceCode cell-code" id="cb20" style="background: #f1f3f5;"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb20-1"><span class="co" style="color: #5E5E5E;
 background-color: null;
-font-style: inherit;"># Load the pre-processed data since we skipped the processing steps</span></span>
+font-style: inherit;"># Load the pre-processed data since I skipped the processing steps</span></span>
 <span id="cb20-2">final_wide <span class="ot" style="color: #003B4F;
 background-color: null;
 font-style: inherit;">&lt;-</span> <span class="fu" style="color: #4758AB;
@@ -1575,7 +1575,7 @@ font-style: inherit;">1</span>)</span></code></pre></div>
 </section>
 <section id="reshaping-imputation-and-merging-wide-format-data" class="level3">
 <h3 class="anchored" data-anchor-id="reshaping-imputation-and-merging-wide-format-data">7. Reshaping, Imputation, and Merging Wide-Format Data</h3>
-<p>We now convert our rolling sum predictors into a wide-format structure for modeling. This creates a matrix where each row represents a cherry year and location, with columns for each day’s rolling sum values.</p>
+<p>I now convert our rolling sum predictors into a wide-format structure for modeling. This creates a matrix where each row represents a cherry year and location, with columns for each day’s rolling sum values.</p>
 <p>Here’s the process for one predictor (positive temperature anomaly rolling sum):</p>
 <div class="cell">
 <div class="sourceCode cell-code" id="cb21" style="background: #f1f3f5;"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb21-1"><span class="co" style="color: #5E5E5E;
@@ -1685,7 +1685,7 @@ font-style: inherit;">&lt;-</span> <span class="fu" style="color: #4758AB;
 background-color: null;
 font-style: inherit;">cbind</span>(wide_temp_ave_pos[, .(cherry_year, location)], imputed_matrix)</span></code></pre></div>
 </div>
-<p>We repeat this process for all eight rolling sum predictors. Missing values (~2.4% per predictor) occur in three scenarios: - Initial period from April 10, 1981 to January 31, 1982 - Dates after February 20, 2025 (extent of available weather data) - Day 366 in non-leap years</p>
+<p>I repeat this process for all eight rolling sum predictors. Missing values (~2.4% per predictor) occur in three scenarios: - Initial period from April 10, 1981 to January 31, 1982 - Dates after February 20, 2025 (extent of available weather data) - Day 366 in non-leap years</p>
 <div class="callout callout-style-default callout-note callout-titled">
 <div class="callout-header d-flex align-content-center" data-bs-toggle="collapse" data-bs-target=".callout-5-contents" aria-controls="callout-5" aria-expanded="false" aria-label="Toggle callout">
 <div class="callout-icon-container">
@@ -2395,7 +2395,7 @@ font-style: inherit;">cbind</span>(wide_prcp_neg[, .(cherry_year, location)], im
 </div>
 </div>
 </div>
-<p>After processing all eight predictor sets, we merge them into a comprehensive dataset:</p>
+<p>After processing all eight predictor sets, I merge them into a comprehensive dataset:</p>
 <div class="cell">
 <div class="sourceCode cell-code" id="cb23" style="background: #f1f3f5;"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb23-1"><span class="co" style="color: #5E5E5E;
 background-color: null;
@@ -2444,7 +2444,7 @@ font-style: inherit;">TRUE</span>)</span></code></pre></div>
 </section>
 <section id="merging-rolling-sums-with-blossom-data" class="level3">
 <h3 class="anchored" data-anchor-id="merging-rolling-sums-with-blossom-data">8. Merging Rolling Sums with Blossom Data</h3>
-<p>Now we merge our wide-format predictors with the actual bloom dates:</p>
+<p>Now I merge our wide-format predictors with the actual bloom dates:</p>
 <div class="cell">
 <div class="sourceCode cell-code" id="cb25" style="background: #f1f3f5;"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb25-1">final_wide <span class="ot" style="color: #003B4F;
 background-color: null;
@@ -2588,7 +2588,7 @@ font-style: inherit;">c</span>(existing_keep_vars, other_vars)]</span></code></p
 </section>
 <section id="selecting-and-engineering-features-for-blossom-date-prediction-using-sparse-partial-least-squares" class="level3">
 <h3 class="anchored" data-anchor-id="selecting-and-engineering-features-for-blossom-date-prediction-using-sparse-partial-least-squares">9. Selecting and Engineering features for blossom date prediction using sparse Partial Least Squares</h3>
-<p>In this section, we use Sparse Partial Least Squares (SPLS) to identify key predictors and extract latent factors that summarize the high-dimensional weather data. We first convert our wide-format dataset into a matrix form and define our predictors and response (bloom day). Next, we perform 10-fold cross-validation to determine the optimal number of latent factors (K) and the sparsity level (eta). With these parameters, we fit the SPLS model to the training data, which selects a subset of predictors and computes a projection matrix. Finally, we use this projection to calculate latent factor scores (e.g., latent1, latent2, etc.) for all observations. These latent factors encapsulate the main variability in the predictors and are then used for further analysis and prediction of the bloom day. Currently we will ignore that this dataset comes from 5 different locations.</p>
+<p>In this section, I use Sparse Partial Least Squares (SPLS) to identify key predictors and extract latent factors that summarize the high-dimensional weather data. I first convert our wide-format dataset into a matrix form and define our predictors and response (bloom day). Next, I perform 10-fold cross-validation to determine the optimal number of latent factors (K) and the sparsity level (eta). With these parameters, I fit the SPLS model to the training data, which selects a subset of predictors and computes a projection matrix. Finally, I use this projection to calculate latent factor scores (e.g., latent1, latent2, etc.) for all observations. These latent factors encapsulate the main variability in the predictors and are then used for further analysis and prediction of the bloom day. Currently I will ignore that this dataset comes from 5 different locations.</p>
 <div class="cell">
 <div class="sourceCode cell-code" id="cb26" style="background: #f1f3f5;"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb26-1"><span class="co" style="color: #5E5E5E;
 background-color: null;
@@ -2813,7 +2813,7 @@ font-style: inherit;">$</span>bloom_doy,</span>
 </section>
 <section id="model-diagnostics-and-latent-factor-interpretation" class="level3">
 <h3 class="anchored" data-anchor-id="model-diagnostics-and-latent-factor-interpretation">10. Model Diagnostics and Latent Factor Interpretation</h3>
-<p>In this section, we first assess the performance of our Sparse PLS model using training data. We compute key statistics—such as R², RMSE, and MAE—to gauge how well the model explains the variance in the bloom day (with a higher R² indicating a better fit).</p>
+<p>In this section, I first assess the performance of our Sparse PLS model using training data. I compute key statistics—such as R², RMSE, and MAE—to gauge how well the model explains the variance in the bloom day (with a higher R² indicating a better fit).</p>
 <div class="cell">
 <div class="sourceCode cell-code" id="cb29" style="background: #f1f3f5;"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb29-1"><span class="co" style="color: #5E5E5E;
 background-color: null;
@@ -3476,7 +3476,7 @@ background-color: null;
 font-style: inherit;">theme_minimal</span>()</span></code></pre></div>
 </div>
 <p>These factors summarize the original rolling sum predictors, showing clear patterns. Negative temperature anomalies accumulated before the median bloom date load negatively; since these sums are negative, a larger accumulation of cold days actually delays blooming. In contrast, higher rolling sums of positive temperature anomalies—indicating warmer days—load negatively, which means that more warm days speed up the bloom. Additionally, the model captures a dormancy effect: a buildup of cold days in October and November tends to lead to an earlier bloom the following year. Similarly, lower-than-average precipitation starting in December is associated with earlier blooming. This interpretation confirms that the latent factors meaningfully reflect the influence of weather on cherry blossom timing.</p>
-<p>Now let’s examine how these latent factors cluster by location. Although our SPLS model was built on the combined dataset—ignoring that measurements come from five different sites with potentially different responses—we can still see some separation. For instance, the third latent factor reveals that different sites tend to occupy distinct regions in the factor space. This variability indicates that site-specific responses exist, which is why we ultimately use a generalized additive model (GAM) to flexibly capture these differences in our final analysis.</p>
+<p>Now let’s examine how these latent factors cluster by location. Although our SPLS model was built on the combined dataset—ignoring that measurements come from five different sites with potentially different responses—I can still see some separation. For instance, the third latent factor reveals that different sites tend to occupy distinct regions in the factor space. This variability indicates that site-specific responses exist, which is why I ultimately use a generalized additive model (GAM) to flexibly capture these differences in our final analysis.</p>
 <div class="cell">
 <div class="sourceCode cell-code" id="cb31" style="background: #f1f3f5;"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb31-1"><span class="co" style="color: #5E5E5E;
 background-color: null;
@@ -3599,12 +3599,12 @@ font-style: inherit;">print</span>(p)</span></code></pre></div>
 </div>
 </div>
 </div>
-<p>Although our SPLS model was built on the combined dataset—ignoring that measurements come from five different sites with potentially different responses—we can still see some separation. For instance, the third latent factor reveals that different sites tend to occupy distinct regions in the factor space. This variability indicates that site-specific responses exist, which is why we ultimately use a generalized additive model (GAM) to flexibly capture these differences in our final analysis.</p>
+<p>Although our SPLS model was built on the combined dataset—ignoring that measurements come from five different sites with potentially different responses—I can still see some separation. For instance, the third latent factor reveals that different sites tend to occupy distinct regions in the factor space. This variability indicates that site-specific responses exist, which is why I ultimately use a generalized additive model (GAM) to flexibly capture these differences in our final analysis.</p>
 </section>
 <section id="dynamic-gam-modeling-for-forecasting" class="level3">
 <h3 class="anchored" data-anchor-id="dynamic-gam-modeling-for-forecasting">11. Dynamic GAM Modeling for Forecasting</h3>
 <p><strong>Dynamic GAM Modeling for Location-Specific Latent Factor Adaptation</strong></p>
-<p>We now have three powerful latent factors from our SPLS analysis that capture the main weather patterns driving cherry blossom variability. However, these factors were derived as linear predictors from data pooled across all five locations, assuming each site responds identically to the same weather patterns.</p>
+<p>I now have three powerful latent factors from our SPLS analysis that capture the main weather patterns driving cherry blossom variability. However, these factors were derived as linear predictors from data pooled across all five locations, assuming each site responds identically to the same weather patterns.</p>
 <p><strong>The problem:</strong>&nbsp;Real cherry trees don’t follow universal rules. Each location likely has its own unique sensitivity to weather - Kyoto’s cherry blossoms might respond differently to warming than Vancouver’s, and some locations have frustratingly sparse observations that make traditional modeling challenging.</p>
 <p><strong>The approach:</strong>&nbsp;So I decided to go with <code>mvgam</code> <span class="citation" data-cites="mvgam">(Clark and Wells 2023)</span>. <code>mvgam</code> stands for MultiVariate (Dynamic) Generalized Additive Models and is specifically designed for time series analysis like ours:</p>
 <ol type="1">
@@ -4797,7 +4797,7 @@ font-style: inherit;">print</span>(p_presentation)</span></code></pre></div>
 </div>
 </div>
 </div>
-<p>Two perfect predictions (Kyoto and Vancouver), and the rest within a week - not bad for a model predicting a complex biological phenomenon months in advance. What started as a challenge to predict cherry blossoms using weather anomalies has demonstrated the power of combining dimensional reduction (SPLS) with flexible modeling (mvgam). The approach successfully handled the twin challenges of high-dimensional weather data and sparse observations, delivering predictions with well-calibrated uncertainty. Most satisfying is that the locations with the least data (New York and Vancouver) performed just as well as data-rich sites - proof that our shrinkage approach effectively borrowed strength across locations. Cherry trees may not follow universal rules, but with the right modeling framework, we can still capture their unique responses to weather patterns</p>
+<p>Two perfect predictions (Kyoto and Vancouver), and the rest within a week - not bad for a model predicting a complex biological phenomenon months in advance. What started as a challenge to predict cherry blossoms using weather anomalies has demonstrated the power of combining dimensional reduction (SPLS) with flexible modeling (mvgam). The approach successfully handled the twin challenges of high-dimensional weather data and sparse observations, delivering predictions with well-calibrated uncertainty. Most satisfying is that the locations with the least data (New York and Vancouver) performed just as well as data-rich sites - proof that our shrinkage approach effectively borrowed strength across locations. Cherry trees may not follow universal rules, but with the right modeling framework, I can still capture their unique responses to weather patterns</p>
 <div class="cell">
 <div class="cell-output-display">
 <p>We used R version 4.5.1 <span class="citation" data-cites="base">(R Core Team 2025)</span> and the following R packages: data.table v. 1.17.6 <span class="citation" data-cites="datatable">(Barrett et al. 2025)</span>, gratia v. 0.10.0 <span class="citation" data-cites="gratia">(Simpson 2024)</span>, missForest v. 1.5 <span class="citation" data-cites="missForest2012 missForest2022">(Stekhoven and Buehlmann 2012; Stekhoven 2022)</span>, mvgam v. 1.1.51 <span class="citation" data-cites="mvgam">(Clark and Wells 2023)</span>, nasapower v. 4.2.5 <span class="citation" data-cites="nasapower">(Sparks 2018)</span>, rmarkdown v. 2.29 <span class="citation" data-cites="rmarkdown2018 rmarkdown2020 rmarkdown2024">(Xie, Allaire, and Grolemund 2018; Xie, Dervieux, and Riederer 2020; Allaire et al. 2024)</span>, scales v. 1.4.0 <span class="citation" data-cites="scales">(Wickham, Pedersen, and Seidel 2025)</span>, spls v. 2.2.3 <span class="citation" data-cites="spls">(Chung, Chun, and Keles 2019)</span>, tidyverse v. 2.0.0 <span class="citation" data-cites="tidyverse">(Wickham et al. 2019)</span>.</p>
