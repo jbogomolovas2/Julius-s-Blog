@@ -8,7 +8,6 @@ image: blossom.png
 ## Cherry Blossom day prediction
 
 So earlier this year I participated in [**International Cherry Blossom Prediction Competition**](https://competition.statistics.gmu.edu/)**,** which invites you to predict this years bloom date of cherry trees in 5 different locations based on provided historical bloom dates provided and any data you dig out. Now that cherry trees bloomed long time ago, I am sharing my entry. As good ideas come after, I enhanced last modelling step by introducing State-space framework into GAM model, allowing to deal with observation poor
-
 Lets load all required packages.
 
 ```{r, message=FALSE, warning=FALSE}
