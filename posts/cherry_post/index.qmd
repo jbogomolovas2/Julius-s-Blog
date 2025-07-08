@@ -1,10 +1,13 @@
 ---
 title: "Cherry Bloom Prediction"
 author: "Julijus Bogomolovas"
-date: "2025-02-25"
+date: "2025-07-07"
 bibliography: grateful-refs.bib
 image: blossom.png
 ---
+## Cherry Blossom day prediction
+
+So earlier this year I participated in [**International Cherry Blossom Prediction Competition**](https://competition.statistics.gmu.edu/)**,** which invites you to predict this years bloom date of cherry trees in 5 different locations based on provided historical bloom dates provided and any data you dig out. Now that cherry trees bloomed long time ago, I am sharing my entry. As good ideas come after, I enhanced last modelling step by introducing State-space framework into GAM model, allowing to deal with observation poor
 
 Lets load all required packages.
 
@@ -23,15 +26,11 @@ library(mvgam)
 library(tibble)
 ```
 
-## Cherry Blossom day prediction
-
-So earlier this year I participated in [**International Cherry Blossom Prediction Competition**](https://competition.statistics.gmu.edu/)**,** which invites you to predict this years bloom date of cherry trees in 5 different locations based on provided historical bloom dates provided and any data you dig out. Now that cherry trees bloomed long time ago, I am sharing my entry. As good ideas come after, I enhanced last modelling step by introducing State-space framework into GAM model, allowing to deal with observation poor time series in several of locations.
-
 ### 1. Weather Data Import
 
-Let's start by uploading historical weather data for studied locations. I found that NASA POWER project provides best continuous weather records using `nasapower` [@nasapower] package. Original records from nearby stations are riddled with missing data. So we download: Tmax, Tmin, Tmean and Precipitation from 1981-01-01 (earliest date available) until the most recent.
+Let's start by uploading historical weather data for studied locations. I found that NASA POWER project provides best continuous weather records using `nasapower` [@nasapower] package. Original records from nearby stations are riddled with missing data. So I download: Tmax, Tmin, Tmean and Precipitation from 1981-01-01 (earliest date available) until the most recent.
 
-Here's how we fetch the data for Kyoto as an example:
+Here's how I fetch the data for Kyoto as an example:
 
 ```{r,eval=FALSE}
 # Retrieve weather data using nasapower for Kyoto
@@ -44,7 +43,7 @@ Kyoto_temp <- get_power(
 )
 ```
 
-We repeat this process for all five cherry blossom locations: Kyoto (Japan), Liestal-Weideli (Switzerland), Washington DC (USA), Vancouver (Canada), and New York City (USA).
+I repeat this process for all five cherry blossom locations: Kyoto (Japan), Liestal-Weideli (Switzerland), Washington DC (USA), Vancouver (Canada), and New York City (USA).
 
 ::: {.callout-note collapse="true"}
 ## Full code for all locations
@@ -87,9 +86,9 @@ NY_temp <- get_power(
 
 ### 2. Calculating Daily Weather Anomalies
 
-Now let's create daily anomalies. We assume that if weather conditions were identical, cherry blossoms would occur on the same day every year. By computing daily anomalies, we partially normalize our variables across different locations.
+Now let's create daily anomalies. I assume that if weather conditions were identical, cherry blossoms would occur on the same day every year. By computing daily anomalies, I partially normalize our variables across different locations.
 
-First, we define a function to calculate these anomalies:
+First, I define a function to calculate these anomalies:
 
 ```{r,eval=FALSE}
 # Function to calculate daily climate anomalies
@@ -132,7 +131,7 @@ calculate_climate_anomalies <- function(data,
 }
 ```
 
-We then apply this function to each location's weather data. Here's an example for New York:
+I then apply this function to each location's weather data. Here's an example for New York:
 
 ```{r,eval=FALSE}
 # Calculate anomalies for New York
@@ -158,7 +157,7 @@ Kyoto_temp_anomalies$location <- "Kyoto, Japan"
 ```
 :::
 
-Finally, we combine all the anomaly data into a single dataset:
+Finally, I combine all the anomaly data into a single dataset:
 
 ```{r,eval=FALSE}
 # Combine all anomaly data
@@ -174,7 +173,7 @@ combined_anomalies <- combined_anomalies[order(combined_anomalies$location, comb
 
 ### 3. Importing and Processing Cherry Blossom Data
 
-Next, we import and combine the cherry blossom data. We filter for records from 1981 onward to ensure the dates match our weather data range:
+Next, I import and combine the cherry blossom data. I filter for records from 1981 onward to ensure the dates match our weather data range:
 
 ```{r}
 # Import cherry blossom data and filter for records from 1981 onward
@@ -241,7 +240,7 @@ print(year_summary_NY_individual)
 ```
 :::
 
-Now we create augmented New York data using the earliest bloom date for each year:
+Now I create augmented New York data using the earliest bloom date for each year:
 
 ```{r}
 # Create new NY data frame from the yearly summary (excluding 2024)
@@ -265,7 +264,7 @@ combined_blossom_dates <- combined_blossom_dates[order(combined_blossom_dates$lo
 
 ### 5. Analyzing Blossom Data
 
-For effective modeling, we need a timeframe that aligns with the natural cherry blossom cycle rather than arbitrary calendar years. Let's analyze our blossom date distribution to identify the optimal starting point for our "cherry year."
+For effective modeling, I need a timeframe that aligns with the natural cherry blossom cycle rather than arbitrary calendar years. Let's analyze our blossom date distribution to identify the optimal starting point for our "cherry year."
 
 ```{r}
 # Summarize blossom dates by location
@@ -282,13 +281,13 @@ blossom_summary <- combined_blossom_dates %>%
 print(blossom_summary)
 ```
 
-The maximum third quartile (Q3) at day 100 represents when 75% of historical blooms have occurred in late–bloomer location—effectively marking the end of the bloom season across locations. While we could theoretically calculate predictors from one recorded bloom date to the next, this creates a circular dependency: to predict next year's bloom date, we'd need to know it already to determine when to stop accumulating our weather predictors. By using day 100 as our universal cutoff, we establish a "cherry year" that runs from April 10 to April 9, nicely matching historical bloom cycles.
+The maximum third quartile (Q3) at day 100 represents when 75% of historical blooms have occurred in late–bloomer location—effectively marking the end of the bloom season across locations. While I could theoretically calculate predictors from one recorded bloom date to the next, this creates a circular dependency: to predict next year's bloom date, we'd need to know it already to determine when to stop accumulating our weather predictors. By using day 100 as our universal cutoff, I establish a "cherry year" that runs from April 10 to April 9, nicely matching historical bloom cycles.
 
 ### 6. Building Rolling Sum Predictors
 
-In this section, we create predictors that capture the cumulative effect of weather anomalies over a 30-day period, which we hypothesize will influence the timing of cherry blossom.
+In this section, I create predictors that capture the cumulative effect of weather anomalies over a 30-day period, which Ihypothesize will influence the timing of cherry blossom.
 
-First, we convert to data.table and compute 30-day rolling sums for each anomaly type. Here's an example for temperature anomalies:
+First, Iconvert to data.table and compute 30-day rolling sums for each anomaly type. Here's an example for temperature anomalies:
 
 ```{r,eval=FALSE}
 # Convert to data.table for efficient rolling calculations
@@ -325,7 +324,7 @@ combined_anomalies[, prcp_neg_rollsum := frollsum(ifelse(PRECTOTCORR_anomaly < 0
 ```
 :::
 
-Next, we create a "cherry year" that aligns with the bloom cycle. Based on our analysis, we start each cherry year on April 10 (day 100):
+Next, I create a "cherry year" that aligns with the bloom cycle. Based on our analysis, I start each cherry year on April 10 (day 100):
 
 ```{r,eval=FALSE}
 # Create a numeric day-of-year and adjust to form a 'cherry_year'
@@ -334,7 +333,7 @@ combined_anomalies[, cherry_year := ifelse(doy >= 100, year(YYYYMMDD) + 1, year(
 combined_anomalies[, day_number := ifelse(doy >= 100, doy - 99, doy + (366 - 99))]
 ```
 
-Finally, we create a streamlined dataset containing only the rolling sum predictors:
+Finally, I create a streamlined dataset containing only the rolling sum predictors:
 
 ```{r,eval=FALSE}
 small_anomaly_df <- combined_anomalies %>%
@@ -346,13 +345,13 @@ small_anomaly_df <- combined_anomalies %>%
 This process creates eight rolling sum predictors (positive and negative anomalies for average/max/min temperature and precipitation) that capture the cumulative weather effects leading up to each potential bloom date.
 
 ```{r load-cached-data}
-# Load the pre-processed data since we skipped the processing steps
+# Load the pre-processed data since I skipped the processing steps
 final_wide <- read.csv("data/final_wide.csv", row.names = 1)
 ```
 
 ### 7. Reshaping, Imputation, and Merging Wide-Format Data
 
-We now convert our rolling sum predictors into a wide-format structure for modeling. This creates a matrix where each row represents a cherry year and location, with columns for each day's rolling sum values.
+I now convert our rolling sum predictors into a wide-format structure for modeling. This creates a matrix where each row represents a cherry year and location, with columns for each day's rolling sum values.
 
 Here's the process for one predictor (positive temperature anomaly rolling sum):
 
@@ -375,7 +374,7 @@ imputed_matrix <- imputed_result$ximp
 wide_temp_ave_pos_imputed <- cbind(wide_temp_ave_pos[, .(cherry_year, location)], imputed_matrix)
 ```
 
-We repeat this process for all eight rolling sum predictors. Missing values (\~2.4% per predictor) occur in three scenarios: - Initial period from April 10, 1981 to January 31, 1982 - Dates after February 20, 2025 (extent of available weather data) - Day 366 in non-leap years
+I repeat this process for all eight rolling sum predictors. Missing values (\~2.4% per predictor) occur in three scenarios: - Initial period from April 10, 1981 to January 31, 1982 - Dates after February 20, 2025 (extent of available weather data) - Day 366 in non-leap years
 
 ::: {.callout-note collapse="true"}
 ## Full reshaping code for all predictors
@@ -474,7 +473,7 @@ wide_prcp_neg_imputed <- cbind(wide_prcp_neg[, .(cherry_year, location)], impute
 ```
 :::
 
-After processing all eight predictor sets, we merge them into a comprehensive dataset:
+After processing all eight predictor sets, I merge them into a comprehensive dataset:
 
 ```{r,eval=FALSE}
 # Merge all wide-format datasets by cherry_year and location
@@ -493,7 +492,7 @@ write.csv(final_wide, "data/final_wide.csv", row.names = TRUE)
 
 ### 8. Merging Rolling Sums with Blossom Data
 
-Now we merge our wide-format predictors with the actual bloom dates:
+Now I merge our wide-format predictors with the actual bloom dates:
 
 ```{r}
 final_wide <- as_tibble(final_wide)
@@ -526,7 +525,7 @@ final_wide <- final_wide[, c(existing_keep_vars, other_vars)]
 
 ### 9. Selecting and Engineering features for blossom date prediction using sparse Partial Least Squares
 
-In this section, we use Sparse Partial Least Squares (SPLS) to identify key predictors and extract latent factors that summarize the high-dimensional weather data. We first convert our wide-format dataset into a matrix form and define our predictors and response (bloom day). Next, we perform 10-fold cross-validation to determine the optimal number of latent factors (K) and the sparsity level (eta). With these parameters, we fit the SPLS model to the training data, which selects a subset of predictors and computes a projection matrix. Finally, we use this projection to calculate latent factor scores (e.g., latent1, latent2, etc.) for all observations. These latent factors encapsulate the main variability in the predictors and are then used for further analysis and prediction of the bloom day. Currently we will ignore that this dataset comes from 5 different locations.
+In this section, I use Sparse Partial Least Squares (SPLS) to identify key predictors and extract latent factors that summarize the high-dimensional weather data. I first convert our wide-format dataset into a matrix form and define our predictors and response (bloom day). Next, I perform 10-fold cross-validation to determine the optimal number of latent factors (K) and the sparsity level (eta). With these parameters, I fit the SPLS model to the training data, which selects a subset of predictors and computes a projection matrix. Finally, I use this projection to calculate latent factor scores (e.g., latent1, latent2, etc.) for all observations. These latent factors encapsulate the main variability in the predictors and are then used for further analysis and prediction of the bloom day. Currently I will ignore that this dataset comes from 5 different locations.
 
 ```{r}
 # Prepare data for SPLS
@@ -574,7 +573,7 @@ latent_df <- data.frame(
 
 ### 10. Model Diagnostics and Latent Factor Interpretation
 
-In this section, we first assess the performance of our Sparse PLS model using training data. We compute key statistics—such as R², RMSE, and MAE—to gauge how well the model explains the variance in the bloom day (with a higher R² indicating a better fit).
+In this section, I first assess the performance of our Sparse PLS model using training data. I compute key statistics—such as R², RMSE, and MAE—to gauge how well the model explains the variance in the bloom day (with a higher R² indicating a better fit).
 
 ```{r}
 # Predict on training data
@@ -675,7 +674,7 @@ p_heatmap <- ggplot(df_plot, aes(x = date, y = anomaly, fill = loading)) +
 
 These factors summarize the original rolling sum predictors, showing clear patterns. Negative temperature anomalies accumulated before the median bloom date load negatively; since these sums are negative, a larger accumulation of cold days actually delays blooming. In contrast, higher rolling sums of positive temperature anomalies—indicating warmer days—load negatively, which means that more warm days speed up the bloom. Additionally, the model captures a dormancy effect: a buildup of cold days in October and November tends to lead to an earlier bloom the following year. Similarly, lower-than-average precipitation starting in December is associated with earlier blooming. This interpretation confirms that the latent factors meaningfully reflect the influence of weather on cherry blossom timing.
 
-Now let's examine how these latent factors cluster by location. Although our SPLS model was built on the combined dataset—ignoring that measurements come from five different sites with potentially different responses—we can still see some separation. For instance, the third latent factor reveals that different sites tend to occupy distinct regions in the factor space. This variability indicates that site-specific responses exist, which is why we ultimately use a generalized additive model (GAM) to flexibly capture these differences in our final analysis.
+Now let's examine how these latent factors cluster by location. Although our SPLS model was built on the combined dataset—ignoring that measurements come from five different sites with potentially different responses—I can still see some separation. For instance, the third latent factor reveals that different sites tend to occupy distinct regions in the factor space. This variability indicates that site-specific responses exist, which is why I ultimately use a generalized additive model (GAM) to flexibly capture these differences in our final analysis.
 
 ```{r}
 # 1) Reshape data so each latent factor is in its own row
@@ -706,13 +705,13 @@ print(p)
 
 ```
 
-Although our SPLS model was built on the combined dataset—ignoring that measurements come from five different sites with potentially different responses—we can still see some separation. For instance, the third latent factor reveals that different sites tend to occupy distinct regions in the factor space. This variability indicates that site-specific responses exist, which is why we ultimately use a generalized additive model (GAM) to flexibly capture these differences in our final analysis.
+Although our SPLS model was built on the combined dataset—ignoring that measurements come from five different sites with potentially different responses—I can still see some separation. For instance, the third latent factor reveals that different sites tend to occupy distinct regions in the factor space. This variability indicates that site-specific responses exist, which is why I ultimately use a generalized additive model (GAM) to flexibly capture these differences in our final analysis.
 
 ### 11. Dynamic GAM Modeling for Forecasting
 
 **Dynamic GAM Modeling for Location-Specific Latent Factor Adaptation**
 
-We now have three powerful latent factors from our SPLS analysis that capture the main weather patterns driving cherry blossom variability. However, these factors were derived as linear predictors from data pooled across all five locations, assuming each site responds identically to the same weather patterns.
+I now have three powerful latent factors from our SPLS analysis that capture the main weather patterns driving cherry blossom variability. However, these factors were derived as linear predictors from data pooled across all five locations, assuming each site responds identically to the same weather patterns.
 
 **The problem:** Real cherry trees don't follow universal rules. Each location likely has its own unique sensitivity to weather - Kyoto's cherry blossoms might respond differently to warming than Vancouver's, and some locations have frustratingly sparse observations that make traditional modeling challenging.
 
@@ -908,7 +907,7 @@ p_presentation <- ggplot() +
 print(p_presentation)
 ```
 
-Two perfect predictions (Kyoto and Vancouver), and the rest within a week - not bad for a model predicting a complex biological phenomenon months in advance. What started as a challenge to predict cherry blossoms using weather anomalies has demonstrated the power of combining dimensional reduction (SPLS) with flexible modeling (mvgam). The approach successfully handled the twin challenges of high-dimensional weather data and sparse observations, delivering predictions with well-calibrated uncertainty. Most satisfying is that the locations with the least data (New York and Vancouver) performed just as well as data-rich sites - proof that our shrinkage approach effectively borrowed strength across locations. Cherry trees may not follow universal rules, but with the right modeling framework, we can still capture their unique responses to weather patterns
+Two perfect predictions (Kyoto and Vancouver), and the rest within a week - not bad for a model predicting a complex biological phenomenon months in advance. What started as a challenge to predict cherry blossoms using weather anomalies has demonstrated the power of combining dimensional reduction (SPLS) with flexible modeling (mvgam). The approach successfully handled the twin challenges of high-dimensional weather data and sparse observations, delivering predictions with well-calibrated uncertainty. Most satisfying is that the locations with the least data (New York and Vancouver) performed just as well as data-rich sites - proof that our shrinkage approach effectively borrowed strength across locations. Cherry trees may not follow universal rules, but with the right modeling framework, I can still capture their unique responses to weather patterns
 
 ```{r, message=FALSE, warning=FALSE}
 #| echo: false
