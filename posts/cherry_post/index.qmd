@@ -3,12 +3,14 @@ title: "Cherry Bloom Prediction"
 author: "Julijus Bogomolovas"
 date: "2025-07-07"
 bibliography: grateful-refs.bib
+categories: [R, Phenology, Time Series Analysis, Machine Learning]
+tags: [rstats, nasapower, spls, sparse-pls, feature-engineering, gam, cross-validation, visualization]
 image: blossom.png
 ---
+
 ## Cherry Blossom day prediction
 
-So earlier this year I participated in [**International Cherry Blossom Prediction Competition**](https://competition.statistics.gmu.edu/)**,** which invites you to predict this years bloom date of cherry trees in 5 different locations based on provided historical bloom dates provided and any data you dig out. Now that cherry trees bloomed long time ago, I am sharing my entry. As good ideas come after, I enhanced last modelling step by introducing State-space framework into GAM model, allowing to deal with observation poor
-Lets load all required packages.
+So earlier this year I participated in [**International Cherry Blossom Prediction Competition**](https://competition.statistics.gmu.edu/)**,** which invites you to predict this years bloom date of cherry trees in 5 different locations based on provided historical bloom dates provided and any data you dig out. Now that cherry trees bloomed long time ago, I am sharing my entry. As good ideas come after, I enhanced last modelling step by introducing State-Space framework into GAM model, allowing to deal with observation poor sites. Lets load all required packages.
 
 ```{r, message=FALSE, warning=FALSE}
 # Load all required packages
@@ -25,14 +27,119 @@ library(mvgam)
 library(tibble)
 ```
 
-### 1. Weather Data Import
+### Cherry Blossom Data Engineering
 
-Let's start by uploading historical weather data for studied locations. I found that NASA POWER project provides best continuous weather records using `nasapower` [@nasapower] package. Original records from nearby stations are riddled with missing data. So I download: Tmax, Tmin, Tmean and Precipitation from 1981-01-01 (earliest date available) until the most recent.
+The historical cherry blossom data was provided by the competition organizers at <https://competition.statistics.gmu.edu/>. For New York City, which had only one historical record in the competition dataset, I augmented it with observations from the USA National Phenology Network.
 
-Here's how I fetch the data for Kyoto as an example:
+::: {.callout-note collapse="true"}
+## Import cherry blossom data
+
+```{r}
+# Import cherry blossom data and filter for records from 1981 onward
+Vancouver <- read_csv("data/vancouver.csv",show_col_types = FALSE)
+Washington <- read_csv("data/washingtondc.csv",show_col_types = FALSE)
+Kyoto <- read_csv("data/kyoto.csv",show_col_types = FALSE)
+Swiss <- read_csv("data/liestal.csv",show_col_types = FALSE)
+Nyc <- read_csv("data/nyc.csv",show_col_types = FALSE)
+
+combined_blossom_dates <- rbind(Vancouver, Washington, Kyoto, Swiss, Nyc)
+combined_blossom_dates <- combined_blossom_dates[order(combined_blossom_dates$location, combined_blossom_dates$year), ]
+combined_blossom_dates <- combined_blossom_dates[combined_blossom_dates$year >= 1981, ]
+```
+:::
+
+::: {.callout-note collapse="true"}
+## Augment New York data with USA-NPN observations
+
+```{r}
+# Read USA-NPN individual phenometrics data
+USA_NPN_status_intensity <- read_csv('data/USA-NPN_status_intensity_observations_data.csv', show_col_types = FALSE)
+
+# Convert to data frame and prepare Intensity_Value as factor
+USA_status <- as.data.frame(USA_NPN_status_intensity)
+USA_status$Intensity_Value <- as.factor(USA_status$Intensity_Value)
+
+# Filter out records with intensity values that do not match our criteria
+USA_status_filtered <- USA_status[!(USA_status$Intensity_Value %in% 
+  c("-9999", "Little", "25-49%", "5-24%", "Less than 5%", "More than 10", "50-74%")), ]
+
+# Convert dates and extract Year and Day of Year
+USA_status_filtered$Date <- mdy(USA_status_filtered$Observation_Date)
+USA_status_filtered$Year <- year(USA_status_filtered$Date)
+USA_status_filtered$Day_of_Year <- yday(USA_status_filtered$Date)
+
+# Create a scatter plot to visualize Day of Year vs. Year, colored by Intensity_Value
+ggplot(USA_status_filtered, aes(x = Year, y = Day_of_Year, color = Intensity_Value)) +
+  geom_point(size = 3, alpha = 0.8) +
+  scale_color_brewer(palette = "Set1") +
+  labs(title = "Day of Year vs Year for USA-NPN Data",
+       x = "Year",
+       y = "Day of Year",
+       color = "Intensity Value") +
+  theme_minimal()
+
+# Summarize the filtered data by year
+year_summary_NY_individual <- USA_status_filtered %>%
+  group_by(Year) %>%
+  summarize(
+    Min = min(Day_of_Year, na.rm = TRUE),
+    Q1 = quantile(Day_of_Year, 0.25, na.rm = TRUE),
+    Median = median(Day_of_Year, na.rm = TRUE),
+    Mean = mean(Day_of_Year, na.rm = TRUE),
+    Q3 = quantile(Day_of_Year, 0.75, na.rm = TRUE),
+    Max = max(Day_of_Year, na.rm = TRUE),
+    Count = n()
+  )
+print(year_summary_NY_individual)
+
+# Create new NY data frame from the yearly summary (excluding 2024)
+ny_data <- data.frame(
+  location = "newyorkcity",
+  lat = 40.73040,
+  long = -73.99809,
+  alt = 8.5,
+  year = year_summary_NY_individual$Year[year_summary_NY_individual$Year != 2024],
+  bloom_date = NA,
+  bloom_doy = year_summary_NY_individual$Min[year_summary_NY_individual$Year != 2024]
+)
+
+# Convert day-of-year to actual dates
+ny_data$bloom_date <- as.Date(ny_data$bloom_doy - 1, origin = paste0(ny_data$year, "-01-01"))
+
+# Merge with existing combined blossom dates
+combined_blossom_dates <- rbind(combined_blossom_dates, ny_data)
+combined_blossom_dates <- combined_blossom_dates[order(combined_blossom_dates$location, combined_blossom_dates$year), ]
+```
+:::
+
+Let's examine the distribution of bloom dates across locations to determine an appropriate modeling timeframe:
+
+```{r}
+# Summarize blossom dates by location
+blossom_summary <- combined_blossom_dates %>%
+  group_by(location) %>%
+  summarise(
+    Min = min(bloom_doy),
+    Q1 = quantile(bloom_doy, 0.25),
+    Median = median(bloom_doy),
+    Q3 = quantile(bloom_doy, 0.75),
+    Max = max(bloom_doy),
+    Range = max(bloom_doy) - min(bloom_doy)
+  )
+print(blossom_summary)
+```
+
+The maximum third quartile (Q3) at day 100 represents when 75% of historical blooms have occurred in late–bloomer locations effectively marking the end of the bloom season across all locations. While I could theoretically calculate predictors from one recorded bloom date to the next, this creates a circular dependency: to predict next year's bloom date, we'd need to know it already to determine when to stop accumulating our weather predictors. By using day 100 as our universal cutoff, I establish a "cherry year" that runs from April 10 to April 9, nicely matching historical bloom cycles. \### 2. Weather Feature Engineering
+
+With our cherry year defined (April 10 to April 9), we now need to engineer weather features that align with this timeframe. The challenge is creating predictors that capture cumulative weather effects leading up to bloom, without knowing when the bloom will occur.
+
+I used NASA POWER for continuous weather data from 1981-2025, calculated daily anomalies to normalize across locations, created 30-day rolling sums to capture cumulative effects, and transformed everything to cherry year coordinates. Missing values (\~2.4%) were imputed using random forest.
+
+::: {.callout-note collapse="true"}
+## Download weather data from NASA POWER
 
 ```{r,eval=FALSE}
-# Retrieve weather data using nasapower for Kyoto
+# Retrieve weather data using nasapower for each location
 Kyoto_temp <- get_power(
        community = "ag",
        lonlat = c(135.6761, 35.0120),
@@ -40,15 +147,7 @@ Kyoto_temp <- get_power(
        dates = c("1981-01-01", "2025-02-15"),
        temporal_api = "daily"
 )
-```
 
-I repeat this process for all five cherry blossom locations: Kyoto (Japan), Liestal-Weideli (Switzerland), Washington DC (USA), Vancouver (Canada), and New York City (USA).
-
-::: {.callout-note collapse="true"}
-## Full code for all locations
-
-```{r,eval=FALSE}
-# Retrieve weather data for remaining locations
 Swiss_temp <- get_power(
   community = "ag",
   lonlat = c(7.730519, 47.4814),
@@ -83,11 +182,8 @@ NY_temp <- get_power(
 ```
 :::
 
-### 2. Calculating Daily Weather Anomalies
-
-Now let's create daily anomalies. I assume that if weather conditions were identical, cherry blossoms would occur on the same day every year. By computing daily anomalies, I partially normalize our variables across different locations.
-
-First, I define a function to calculate these anomalies:
+::: {.callout-note collapse="true"}
+## Calculate daily weather anomalies
 
 ```{r,eval=FALSE}
 # Function to calculate daily climate anomalies
@@ -128,38 +224,21 @@ calculate_climate_anomalies <- function(data,
   
   return(result)
 }
-```
 
-I then apply this function to each location's weather data. Here's an example for New York:
-
-```{r,eval=FALSE}
-# Calculate anomalies for New York
+# Calculate anomalies for each location
 NY_temp_anomalies <- calculate_climate_anomalies(NY_temp)
-NY_temp_anomalies$location <- "New York, USA"
-```
-
-::: {.callout-note collapse="true"}
-## Processing all locations
-
-```{r,eval=FALSE}
-# Calculate anomalies for remaining locations
 Vancouver_temp_anomalies <- calculate_climate_anomalies(Vancouver_temp)
 Swiss_temp_anomalies <- calculate_climate_anomalies(Swiss_temp)
 Washington_temp_anomalies <- calculate_climate_anomalies(Washington_temp)
 Kyoto_temp_anomalies <- calculate_climate_anomalies(Kyoto_temp)
 
-# Append location identifiers
+# Append location identifiers and combine
+NY_temp_anomalies$location <- "New York, USA"
 Vancouver_temp_anomalies$location <- "Vancouver, Canada"
 Swiss_temp_anomalies$location <- "Liestal-Weideli, Switzerland"
 Washington_temp_anomalies$location <- "Washington DC, USA"
 Kyoto_temp_anomalies$location <- "Kyoto, Japan"
-```
-:::
 
-Finally, I combine all the anomaly data into a single dataset:
-
-```{r,eval=FALSE}
-# Combine all anomaly data
 combined_anomalies <- rbind(
   NY_temp_anomalies,
   Vancouver_temp_anomalies,
@@ -169,312 +248,57 @@ combined_anomalies <- rbind(
 )
 combined_anomalies <- combined_anomalies[order(combined_anomalies$location, combined_anomalies$YYYYMMDD), ]
 ```
-
-### 3. Importing and Processing Cherry Blossom Data
-
-Next, I import and combine the cherry blossom data. I filter for records from 1981 onward to ensure the dates match our weather data range:
-
-```{r}
-# Import cherry blossom data and filter for records from 1981 onward
-Vancouver <- read_csv("data/vancouver.csv",show_col_types = FALSE)
-Washington <- read_csv("data/washingtondc.csv",show_col_types = FALSE)
-Kyoto <- read_csv("data/kyoto.csv",show_col_types = FALSE)
-Swiss <- read_csv("data/liestal.csv",show_col_types = FALSE)
-Nyc <- read_csv("data/nyc.csv",show_col_types = FALSE)
-
-combined_blossom_dates <- rbind(Vancouver, Washington, Kyoto, Swiss, Nyc)
-combined_blossom_dates <- combined_blossom_dates[order(combined_blossom_dates$location, combined_blossom_dates$year), ]
-combined_blossom_dates <- combined_blossom_dates[combined_blossom_dates$year >= 1981, ]
-```
-
-### 4. Augmenting New York Blossom Data
-
-The primary dataset contains only one record for New York. To augment it, I retrieve data from the USA National Phenology Network. Based on recommendations, I filter for the specific location and species, then select records with more than 74% blossom (excluding the 50–74% category, which does not match our original data). For each year, I select the earliest record:
-
-```{r}
-# Read USA-NPN individual phenometrics data
-USA_NPN_status_intensity <- read_csv('data/USA-NPN_status_intensity_observations_data.csv', show_col_types = FALSE)
-
-# Convert to data frame and prepare Intensity_Value as factor
-USA_status <- as.data.frame(USA_NPN_status_intensity)
-USA_status$Intensity_Value <- as.factor(USA_status$Intensity_Value)
-
-# Filter out records with intensity values that do not match our criteria
-USA_status_filtered <- USA_status[!(USA_status$Intensity_Value %in% 
-  c("-9999", "Little", "25-49%", "5-24%", "Less than 5%", "More than 10", "50-74%")), ]
-
-# Convert dates and extract Year and Day of Year
-USA_status_filtered$Date <- mdy(USA_status_filtered$Observation_Date)
-USA_status_filtered$Year <- year(USA_status_filtered$Date)
-USA_status_filtered$Day_of_Year <- yday(USA_status_filtered$Date)
-```
-
-::: {.callout-tip collapse="true"}
-## Visualization and detailed summary
-
-```{r}
-# Create a scatter plot to visualize Day of Year vs. Year, colored by Intensity_Value
-ggplot(USA_status_filtered, aes(x = Year, y = Day_of_Year, color = Intensity_Value)) +
-  geom_point(size = 3, alpha = 0.8) +
-  scale_color_brewer(palette = "Set1") +
-  labs(title = "Day of Year vs Year for USA-NPN Data",
-       x = "Year",
-       y = "Day of Year",
-       color = "Intensity Value") +
-  theme_minimal()
-
-# Summarize the filtered data by year
-year_summary_NY_individual <- USA_status_filtered %>%
-  group_by(Year) %>%
-  summarize(
-    Min = min(Day_of_Year, na.rm = TRUE),
-    Q1 = quantile(Day_of_Year, 0.25, na.rm = TRUE),
-    Median = median(Day_of_Year, na.rm = TRUE),
-    Mean = mean(Day_of_Year, na.rm = TRUE),
-    Q3 = quantile(Day_of_Year, 0.75, na.rm = TRUE),
-    Max = max(Day_of_Year, na.rm = TRUE),
-    Count = n()
-  )
-print(year_summary_NY_individual)
-```
 :::
-
-Now I create augmented New York data using the earliest bloom date for each year:
-
-```{r}
-# Create new NY data frame from the yearly summary (excluding 2024)
-ny_data <- data.frame(
-  location = "newyorkcity",
-  lat = 40.73040,
-  long = -73.99809,
-  alt = 8.5,
-  year = year_summary_NY_individual$Year[year_summary_NY_individual$Year != 2024],
-  bloom_date = NA,
-  bloom_doy = year_summary_NY_individual$Min[year_summary_NY_individual$Year != 2024]
-)
-
-# Convert day-of-year to actual dates
-ny_data$bloom_date <- as.Date(ny_data$bloom_doy - 1, origin = paste0(ny_data$year, "-01-01"))
-
-# Merge with existing combined blossom dates
-combined_blossom_dates <- rbind(combined_blossom_dates, ny_data)
-combined_blossom_dates <- combined_blossom_dates[order(combined_blossom_dates$location, combined_blossom_dates$year), ]
-```
-
-### 5. Analyzing Blossom Data
-
-For effective modeling, I need a timeframe that aligns with the natural cherry blossom cycle rather than arbitrary calendar years. Let's analyze our blossom date distribution to identify the optimal starting point for our "cherry year."
-
-```{r}
-# Summarize blossom dates by location
-blossom_summary <- combined_blossom_dates %>%
-  group_by(location) %>%
-  summarise(
-    Min = min(bloom_doy),
-    Q1 = quantile(bloom_doy, 0.25),
-    Median = median(bloom_doy),
-    Q3 = quantile(bloom_doy, 0.75),
-    Max = max(bloom_doy),
-    Range = max(bloom_doy) - min(bloom_doy)
-  )
-print(blossom_summary)
-```
-
-The maximum third quartile (Q3) at day 100 represents when 75% of historical blooms have occurred in late–bloomer location—effectively marking the end of the bloom season across locations. While I could theoretically calculate predictors from one recorded bloom date to the next, this creates a circular dependency: to predict next year's bloom date, we'd need to know it already to determine when to stop accumulating our weather predictors. By using day 100 as our universal cutoff, I establish a "cherry year" that runs from April 10 to April 9, nicely matching historical bloom cycles.
-
-### 6. Building Rolling Sum Predictors
-
-In this section, I create predictors that capture the cumulative effect of weather anomalies over a 30-day period, which Ihypothesize will influence the timing of cherry blossom.
-
-First, Iconvert to data.table and compute 30-day rolling sums for each anomaly type. Here's an example for temperature anomalies:
-
-```{r,eval=FALSE}
-# Convert to data.table for efficient rolling calculations
-combined_anomalies <- as.data.table(combined_anomalies)
-
-# Example: Calculate 30-day rolling sums for average temperature anomalies
-combined_anomalies[, temp_ave_pos_rollsum := frollsum(ifelse(T2M_anomaly > 0, T2M_anomaly, 0), 
-                                                      n = 30, align = "right"), by = location]
-combined_anomalies[, temp_ave_neg_rollsum := frollsum(ifelse(T2M_anomaly < 0, T2M_anomaly, 0), 
-                                                      n = 30, align = "right"), by = location]
-```
 
 ::: {.callout-note collapse="true"}
-## Complete rolling sum calculations for all variables
+## Create rolling sums and transform to cherry years
 
 ```{r,eval=FALSE}
-# Maximum temperature rolling sums
-combined_anomalies[, temp_max_pos_rollsum := frollsum(ifelse(T2M_MAX_anomaly > 0, T2M_MAX_anomaly, 0), 
-                                                      n = 30, align = "right"), by = location]
-combined_anomalies[, temp_max_neg_rollsum := frollsum(ifelse(T2M_MAX_anomaly < 0, T2M_MAX_anomaly, 0), 
-                                                      n = 30, align = "right"), by = location]
+# Convert to data.table and compute 30-day rolling sums for each anomaly type
+combined_anomalies <- as.data.table(combined_anomalies)
+combined_anomalies[, temp_ave_pos_rollsum := frollsum(ifelse(T2M_anomaly > 0, T2M_anomaly, 0), n = 30, align = "right"), by = location]
+combined_anomalies[, temp_ave_neg_rollsum := frollsum(ifelse(T2M_anomaly < 0, T2M_anomaly, 0), n = 30, align = "right"), by = location]
+combined_anomalies[, temp_max_pos_rollsum := frollsum(ifelse(T2M_MAX_anomaly > 0, T2M_MAX_anomaly, 0), n = 30, align = "right"), by = location]
+combined_anomalies[, temp_max_neg_rollsum := frollsum(ifelse(T2M_MAX_anomaly < 0, T2M_MAX_anomaly, 0), n = 30, align = "right"), by = location]
+combined_anomalies[, temp_min_pos_rollsum := frollsum(ifelse(T2M_MIN_anomaly > 0, T2M_MIN_anomaly, 0), n = 30, align = "right"), by = location]
+combined_anomalies[, temp_min_neg_rollsum := frollsum(ifelse(T2M_MIN_anomaly < 0, T2M_MIN_anomaly, 0), n = 30, align = "right"), by = location]
+combined_anomalies[, prcp_pos_rollsum := frollsum(ifelse(PRECTOTCORR_anomaly > 0, PRECTOTCORR_anomaly, 0), n = 30, align = "right"), by = location]
+combined_anomalies[, prcp_neg_rollsum := frollsum(ifelse(PRECTOTCORR_anomaly < 0, PRECTOTCORR_anomaly, 0), n = 30, align = "right"), by = location]
 
-# Minimum temperature rolling sums
-combined_anomalies[, temp_min_pos_rollsum := frollsum(ifelse(T2M_MIN_anomaly > 0, T2M_MIN_anomaly, 0), 
-                                                      n = 30, align = "right"), by = location]
-combined_anomalies[, temp_min_neg_rollsum := frollsum(ifelse(T2M_MIN_anomaly < 0, T2M_MIN_anomaly, 0), 
-                                                      n = 30, align = "right"), by = location]
-
-# Precipitation rolling sums
-combined_anomalies[, prcp_pos_rollsum := frollsum(ifelse(PRECTOTCORR_anomaly > 0, PRECTOTCORR_anomaly, 0), 
-                                                  n = 30, align = "right"), by = location]
-combined_anomalies[, prcp_neg_rollsum := frollsum(ifelse(PRECTOTCORR_anomaly < 0, PRECTOTCORR_anomaly, 0), 
-                                                  n = 30, align = "right"), by = location]
-```
-:::
-
-Next, I create a "cherry year" that aligns with the bloom cycle. Based on our analysis, I start each cherry year on April 10 (day 100):
-
-```{r,eval=FALSE}
 # Create a numeric day-of-year and adjust to form a 'cherry_year'
 combined_anomalies[, doy := as.numeric(format(YYYYMMDD, "%j"))]
 combined_anomalies[, cherry_year := ifelse(doy >= 100, year(YYYYMMDD) + 1, year(YYYYMMDD))]
 combined_anomalies[, day_number := ifelse(doy >= 100, doy - 99, doy + (366 - 99))]
-```
 
-Finally, I create a streamlined dataset containing only the rolling sum predictors:
-
-```{r,eval=FALSE}
 small_anomaly_df <- combined_anomalies %>%
   select(-c(DOY, LON, LAT, YEAR, MM, DD, T2M, T2M_MAX, T2M_MIN, PRECTOTCORR,
             T2M_mean, T2M_MAX_mean, T2M_MIN_mean, PRECTOTCORR_mean,
             T2M_anomaly, T2M_MAX_anomaly, T2M_MIN_anomaly, PRECTOTCORR_anomaly))
 ```
+:::
 
-This process creates eight rolling sum predictors (positive and negative anomalies for average/max/min temperature and precipitation) that capture the cumulative weather effects leading up to each potential bloom date.
-
-```{r load-cached-data}
-# Load the pre-processed data since I skipped the processing steps
-final_wide <- read.csv("data/final_wide.csv", row.names = 1)
-```
-
-### 7. Reshaping, Imputation, and Merging Wide-Format Data
-
-I now convert our rolling sum predictors into a wide-format structure for modeling. This creates a matrix where each row represents a cherry year and location, with columns for each day's rolling sum values.
-
-Here's the process for one predictor (positive temperature anomaly rolling sum):
+::: {.callout-note collapse="true"}
+## Reshape to wide format and impute missing values
 
 ```{r,eval=FALSE}
-# Reshape data to wide format
+# Example for positive temperature average anomalies - repeated for all 8 variables
 wide_temp_ave_pos <- dcast(small_anomaly_df[!is.na(temp_ave_pos_rollsum)], 
                            cherry_year + location ~ day_number, 
                            value.var = "temp_ave_pos_rollsum")
-
-# Rename columns to be more descriptive
 setnames(wide_temp_ave_pos, 
          old = setdiff(names(wide_temp_ave_pos), c("cherry_year", "location")), 
          new = paste0("temp_ave_pos_rollsum_", seq_along(setdiff(names(wide_temp_ave_pos), c("cherry_year", "location")))))
 
-# Impute missing values using random forest
 numeric_cols <- setdiff(names(wide_temp_ave_pos), c("cherry_year", "location"))
 numeric_matrix <- as.matrix(wide_temp_ave_pos[, ..numeric_cols])
 imputed_result <- missForest(numeric_matrix, maxiter = 5, verbose = TRUE)
 imputed_matrix <- imputed_result$ximp
 wide_temp_ave_pos_imputed <- cbind(wide_temp_ave_pos[, .(cherry_year, location)], imputed_matrix)
-```
 
-I repeat this process for all eight rolling sum predictors. Missing values (\~2.4% per predictor) occur in three scenarios: - Initial period from April 10, 1981 to January 31, 1982 - Dates after February 20, 2025 (extent of available weather data) - Day 366 in non-leap years
+# Repeat for all 8 rolling sum variables...
+# [Similar code blocks for temp_ave_neg, temp_max_pos, temp_max_neg, 
+#  temp_min_pos, temp_min_neg, prcp_pos, prcp_neg]
 
-::: {.callout-note collapse="true"}
-## Full reshaping code for all predictors
-
-```{r,eval=FALSE}
-# Process negative temperature average anomalies
-wide_temp_ave_neg <- dcast(small_anomaly_df[!is.na(temp_ave_neg_rollsum)], 
-                           cherry_year + location ~ day_number, 
-                           value.var = "temp_ave_neg_rollsum")
-setnames(wide_temp_ave_neg, 
-         old = setdiff(names(wide_temp_ave_neg), c("cherry_year", "location")), 
-         new = paste0("temp_ave_neg_rollsum_", seq_along(setdiff(names(wide_temp_ave_neg), c("cherry_year", "location")))))
-numeric_cols <- setdiff(names(wide_temp_ave_neg), c("cherry_year", "location"))
-numeric_matrix <- as.matrix(wide_temp_ave_neg[, ..numeric_cols])
-imputed_result <- missForest(numeric_matrix, maxiter = 5, verbose = TRUE)
-imputed_matrix <- imputed_result$ximp
-wide_temp_ave_neg_imputed <- cbind(wide_temp_ave_neg[, .(cherry_year, location)], imputed_matrix)
-
-# Process positive temperature maximum anomalies
-wide_temp_max_pos <- dcast(small_anomaly_df[!is.na(temp_max_pos_rollsum)], 
-                           cherry_year + location ~ day_number, 
-                           value.var = "temp_max_pos_rollsum")
-setnames(wide_temp_max_pos, 
-         old = setdiff(names(wide_temp_max_pos), c("cherry_year", "location")), 
-         new = paste0("temp_max_pos_rollsum_", seq_along(setdiff(names(wide_temp_max_pos), c("cherry_year", "location")))))
-numeric_cols <- setdiff(names(wide_temp_max_pos), c("cherry_year", "location"))
-numeric_matrix <- as.matrix(wide_temp_max_pos[, ..numeric_cols])
-imputed_result <- missForest(numeric_matrix, maxiter = 5, verbose = TRUE)
-imputed_matrix <- imputed_result$ximp
-wide_temp_max_pos_imputed <- cbind(wide_temp_max_pos[, .(cherry_year, location)], imputed_matrix)
-
-# Process negative temperature maximum anomalies
-wide_temp_max_neg <- dcast(small_anomaly_df[!is.na(temp_max_neg_rollsum)], 
-                           cherry_year + location ~ day_number, 
-                           value.var = "temp_max_neg_rollsum")
-setnames(wide_temp_max_neg, 
-         old = setdiff(names(wide_temp_max_neg), c("cherry_year", "location")), 
-         new = paste0("temp_max_neg_rollsum_", seq_along(setdiff(names(wide_temp_max_neg), c("cherry_year", "location")))))
-numeric_cols <- setdiff(names(wide_temp_max_neg), c("cherry_year", "location"))
-numeric_matrix <- as.matrix(wide_temp_max_neg[, ..numeric_cols])
-imputed_result <- missForest(numeric_matrix, maxiter = 5, verbose = TRUE)
-imputed_matrix <- imputed_result$ximp
-wide_temp_max_neg_imputed <- cbind(wide_temp_max_neg[, .(cherry_year, location)], imputed_matrix)
-
-# Process positive temperature minimum anomalies
-wide_temp_min_pos <- dcast(small_anomaly_df[!is.na(temp_min_pos_rollsum)], 
-                           cherry_year + location ~ day_number, 
-                           value.var = "temp_min_pos_rollsum")
-setnames(wide_temp_min_pos, 
-         old = setdiff(names(wide_temp_min_pos), c("cherry_year", "location")), 
-         new = paste0("temp_min_pos_rollsum_", seq_along(setdiff(names(wide_temp_min_pos), c("cherry_year", "location")))))
-numeric_cols <- setdiff(names(wide_temp_min_pos), c("cherry_year", "location"))
-numeric_matrix <- as.matrix(wide_temp_min_pos[, ..numeric_cols])
-imputed_result <- missForest(numeric_matrix, maxiter = 5, verbose = TRUE)
-imputed_matrix <- imputed_result$ximp
-wide_temp_min_pos_imputed <- cbind(wide_temp_min_pos[, .(cherry_year, location)], imputed_matrix)
-
-# Process negative temperature minimum anomalies
-wide_temp_min_neg <- dcast(small_anomaly_df[!is.na(temp_min_neg_rollsum)], 
-                           cherry_year + location ~ day_number, 
-                           value.var = "temp_min_neg_rollsum")
-setnames(wide_temp_min_neg, 
-         old = setdiff(names(wide_temp_min_neg), c("cherry_year", "location")), 
-         new = paste0("temp_min_neg_rollsum_", seq_along(setdiff(names(wide_temp_min_neg), c("cherry_year", "location")))))
-numeric_cols <- setdiff(names(wide_temp_min_neg), c("cherry_year", "location"))
-numeric_matrix <- as.matrix(wide_temp_min_neg[, ..numeric_cols])
-imputed_result <- missForest(numeric_matrix, maxiter = 5, verbose = TRUE)
-imputed_matrix <- imputed_result$ximp
-wide_temp_min_neg_imputed <- cbind(wide_temp_min_neg[, .(cherry_year, location)], imputed_matrix)
-
-# Process positive precipitation anomalies
-wide_prcp_pos <- dcast(small_anomaly_df[!is.na(prcp_pos_rollsum)], 
-                       cherry_year + location ~ day_number, 
-                       value.var = "prcp_pos_rollsum")
-setnames(wide_prcp_pos, 
-         old = setdiff(names(wide_prcp_pos), c("cherry_year", "location")), 
-         new = paste0("prcp_pos_rollsum_", seq_along(setdiff(names(wide_prcp_pos), c("cherry_year", "location")))))
-numeric_cols <- setdiff(names(wide_prcp_pos), c("cherry_year", "location"))
-numeric_matrix <- as.matrix(wide_prcp_pos[, ..numeric_cols])
-imputed_result <- missForest(numeric_matrix, maxiter = 5, verbose = TRUE)
-imputed_matrix <- imputed_result$ximp
-wide_prcp_pos_imputed <- cbind(wide_prcp_pos[, .(cherry_year, location)], imputed_matrix)
-
-# Process negative precipitation anomalies
-wide_prcp_neg <- dcast(small_anomaly_df[!is.na(prcp_neg_rollsum)], 
-                       cherry_year + location ~ day_number, 
-                       value.var = "prcp_neg_rollsum")
-setnames(wide_prcp_neg, 
-         old = setdiff(names(wide_prcp_neg), c("cherry_year", "location")), 
-         new = paste0("prcp_neg_rollsum_", seq_along(setdiff(names(wide_prcp_neg), c("cherry_year", "location")))))
-numeric_cols <- setdiff(names(wide_prcp_neg), c("cherry_year", "location"))
-numeric_matrix <- as.matrix(wide_prcp_neg[, ..numeric_cols])
-imputed_result <- missForest(numeric_matrix, maxiter = 5, verbose = TRUE)
-imputed_matrix <- imputed_result$ximp
-wide_prcp_neg_imputed <- cbind(wide_prcp_neg[, .(cherry_year, location)], imputed_matrix)
-```
-:::
-
-After processing all eight predictor sets, I merge them into a comprehensive dataset:
-
-```{r,eval=FALSE}
 # Merge all wide-format datasets by cherry_year and location
 final_wide <- Reduce(function(x, y) merge(x, y, by = c("cherry_year", "location"), all = TRUE),
                      list(wide_temp_ave_pos_imputed, wide_temp_ave_neg_imputed, 
@@ -482,18 +306,12 @@ final_wide <- Reduce(function(x, y) merge(x, y, by = c("cherry_year", "location"
                           wide_temp_min_pos_imputed, wide_temp_min_neg_imputed,
                           wide_prcp_pos_imputed, wide_prcp_neg_imputed))
 ```
+:::
 
-This gives us 8 rolling sum variables × 366 days = 2,928 predictors per location per year. Due to the computational intensity of the imputation process, you can download the pre-imputed file from [final_wide.csv](data/final_wide.csv):
+::: {.callout-note collapse="true"}
+## Merge with bloom dates
 
 ```{r,eval=FALSE}
-write.csv(final_wide, "data/final_wide.csv", row.names = TRUE)
-```
-
-### 8. Merging Rolling Sums with Blossom Data
-
-Now I merge our wide-format predictors with the actual bloom dates:
-
-```{r}
 final_wide <- as_tibble(final_wide)
 
 # Map location names to match blossom data format
@@ -520,11 +338,24 @@ keep_vars <- c("cherry_year", "location", "bloom_doy")
 existing_keep_vars <- keep_vars[keep_vars %in% colnames(final_wide)]
 other_vars <- setdiff(names(final_wide), c(existing_keep_vars, "location_mapped"))
 final_wide <- final_wide[, c(existing_keep_vars, other_vars)]
+
+# Save the final dataset
+write.csv(final_wide, "data/final_wide_with_bloom.csv", row.names = TRUE)
+```
+:::
+
+The final dataset contains 2,928 weather predictors (8 rolling sums × 366 days) aligned to our cherry year timeframe, plus the actual bloom dates. You can download the pre-processed data from [final_wide_with_bloom.csv](data/final_wide_with_bloom.csv) or recreate it using the code above.
+
+To use the pre-processed data in your analysis:
+
+```{r}
+# Load the pre-processed data
+final_wide <- read.csv("data/final_wide_with_bloom.csv", row.names = 1)
 ```
 
-### 9. Selecting and Engineering features for blossom date prediction using sparse Partial Least Squares
+### Selecting and Engineering features for blossom date prediction using sparse Partial Least Squares
 
-In this section, I use Sparse Partial Least Squares (SPLS) to identify key predictors and extract latent factors that summarize the high-dimensional weather data. I first convert our wide-format dataset into a matrix form and define our predictors and response (bloom day). Next, I perform 10-fold cross-validation to determine the optimal number of latent factors (K) and the sparsity level (eta). With these parameters, I fit the SPLS model to the training data, which selects a subset of predictors and computes a projection matrix. Finally, I use this projection to calculate latent factor scores (e.g., latent1, latent2, etc.) for all observations. These latent factors encapsulate the main variability in the predictors and are then used for further analysis and prediction of the bloom day. Currently I will ignore that this dataset comes from 5 different locations.
+In this section, I use Sparse Partial Least Squares (SPLS) to identify key predictors and extract latent factors that summarize the high-dimensional weather data. SPLS is particularly well-suited for our case: we have nearly 3,000 highly correlated rolling-sum features and just a few hundred samples. This method not only reduces dimensionality but also performs variable selection by introducing a sparsity penalty—so we can focus on the most relevant time windows and weather patterns that drive blooming. I first convert our wide-format dataset into a matrix form and define predictors (X) and the response (Y, i.e., bloom day). Then, I run a grid search with 10-fold cross-validation to find the best combination of latent factor count (K) and sparsity level (eta). Once the optimal parameters are selected, I fit the SPLS model to the training data. This gives me both a sparse projection matrix and a subset of predictors contributing to each latent factor. Finally, I use the trained model to compute latent scores (`latent1`, `latent2`, etc.) for all observations—these represent condensed weather signatures that track with bloom timing and will be used for downstream modeling. For now, I’ll treat all locations as pooled, ignoring site-specific effects (which I’ll handle later with GAMs).
 
 ```{r}
 # Prepare data for SPLS
@@ -570,9 +401,7 @@ latent_df <- data.frame(
 
 ```
 
-### 10. Model Diagnostics and Latent Factor Interpretation
-
-In this section, I first assess the performance of our Sparse PLS model using training data. I compute key statistics—such as R², RMSE, and MAE—to gauge how well the model explains the variance in the bloom day (with a higher R² indicating a better fit).
+So our optimization left us with 3 latent factors. Not bad. Lets as LLMs like to say delve deeper. \### Performance of our Sparse PLS model I first assess the performance of our Sparse PLS model using training data. I compute key statistics—such as R², RMSE, and MAE—to gauge how well the model explains the variance in the bloom day (with a higher R² indicating a better fit).
 
 ```{r}
 # Predict on training data
@@ -586,7 +415,7 @@ RMSE_train <- sqrt(mean((Y_train - y_pred_train)^2))
 n_selected_vars <- length(final_model$A)
 percent_vars_selected <- (n_selected_vars / length(predictor_cols)) * 100
 
-# Create diagnostic plot with statistics
+# Diagnostic plot with unified styling
 stats_text <- paste0(
   "R² = ", round(R2_train, 3), "\n",
   "RMSE = ", round(RMSE_train, 1), " days\n",
@@ -596,21 +425,27 @@ stats_text <- paste0(
 )
 
 ggplot(data.frame(Actual = Y_train, Predicted = y_pred_train), aes(x = Actual, y = Predicted)) +
-  geom_point(alpha = 0.5) +
-  geom_abline(intercept = 0, slope = 1, color = "red", linetype = "dashed") +
+  geom_point(color = "#1f77b4", alpha = 0.6, size = 2.5) +
+  geom_abline(intercept = 0, slope = 1, linetype = "dashed", color = "#d62728") +
   annotate("text", x = max(Y_train) - 5, y = min(y_pred_train) + 10, 
-           label = stats_text, hjust = 1, vjust = 0, size = 4,
-           color = "black") +
-  theme_minimal() +
-  labs(title = "Predicted vs Actual Bloom Day",
-       x = "Actual Bloom DOY", y = "Predicted Bloom DOY")
+           label = stats_text, hjust = 1, vjust = 0, size = 4.2, color = "black") +
+  labs(
+    title = "Predicted vs Actual Bloom Day",
+    x = "Actual Bloom DOY",
+    y = "Predicted Bloom DOY"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(
+    plot.title = element_text(face = "bold"),
+    legend.position = "right"
+  )
 ```
 
 Not so shabby! Now lets examine the latent factors:
 
-```{r}
-# Latent Factor Interpretation
+### Latent Factor Interpretation
 
+```{r}
 # Parse the projection matrix from the SPLS model
 proj_mat <- final_model$projection
 # Each row name is in the form "temp_ave_pos_rollsum_123"
@@ -659,54 +494,79 @@ df_plot <- df_plot %>%
          anomaly = factor(anomaly, levels = c("pos", "neg")))
 
 # Heatmap of latent factor loadings
-p_heatmap <- ggplot(df_plot, aes(x = date, y = anomaly, fill = loading)) +
+ggplot(df_plot, aes(x = date, y = anomaly, fill = loading)) +
   geom_tile() +
   facet_grid(type ~ factor) +
-  scale_x_date(date_breaks = "2 months", date_labels = "%b") +  # Show every 2nd month
-  scale_fill_gradient2(low = "blue", mid = "white", high = "red", midpoint = 0, 
-                       na.value = "grey90",
-                       labels = scales::label_number(accuracy = 0.0001)) +
-  labs(title = "Heatmap of SPLS Loadings by Factor and Variable Type",
-       x = "Months", y = "Anomaly (pos vs neg)", fill = "Loading") +
-  theme_minimal()
+  scale_x_date(date_breaks = "2 months", date_labels = "%b") +
+  scale_fill_gradient2(
+    low = "#313695", mid = "white", high = "#a50026", midpoint = 0,
+    na.value = "grey90",
+    labels = scales::label_number(accuracy = 0.0001)
+  ) +
+  labs(
+    title = "Heatmap of SPLS Loadings by Factor and Variable Type",
+    x = "Date (within cherry year)",
+    y = "Anomaly Direction",
+    fill = "Loading"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(
+    strip.text = element_text(face = "bold"),
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    plot.title = element_text(face = "bold")
+  )
+
 ```
 
 These factors summarize the original rolling sum predictors, showing clear patterns. Negative temperature anomalies accumulated before the median bloom date load negatively; since these sums are negative, a larger accumulation of cold days actually delays blooming. In contrast, higher rolling sums of positive temperature anomalies—indicating warmer days—load negatively, which means that more warm days speed up the bloom. Additionally, the model captures a dormancy effect: a buildup of cold days in October and November tends to lead to an earlier bloom the following year. Similarly, lower-than-average precipitation starting in December is associated with earlier blooming. This interpretation confirms that the latent factors meaningfully reflect the influence of weather on cherry blossom timing.
 
-Now let's examine how these latent factors cluster by location. Although our SPLS model was built on the combined dataset—ignoring that measurements come from five different sites with potentially different responses—I can still see some separation. For instance, the third latent factor reveals that different sites tend to occupy distinct regions in the factor space. This variability indicates that site-specific responses exist, which is why I ultimately use a generalized additive model (GAM) to flexibly capture these differences in our final analysis.
+Now let's examine how these latent factors cluster by location.
 
-```{r}
-# 1) Reshape data so each latent factor is in its own row
-latent_long <- latent_df %>%
-  pivot_longer(
-    cols = starts_with("latent"),  # or c("latent1", "latent2", "latent3")
-    names_to = "factor",
-    values_to = "score"
-  )
+```{r, fig.width=10, fig.height=10}
+# Cleaned and pivoted as before
+latent_clean <- latent_df %>%
+  pivot_longer(starts_with("latent"), names_to = "factor", values_to = "score") %>%
+  filter(!is.na(bloom_doy), !is.na(score), is.finite(bloom_doy), is.finite(score))
 
-# 2) Create the scatter plot, facet by factor
-p <- ggplot(latent_long, aes(x = bloom_doy, y = score, color = location)) +
-  # Use na.rm=TRUE so rows with NA in bloom_doy or score are simply not plotted
-  geom_point(na.rm = TRUE) +
-  # Optional: add a smoothing trend line for each location
-  # geom_smooth(method = "lm", se = FALSE, na.rm = TRUE)
-
-  facet_wrap(~ factor, scales = "free_y") +
-  labs(
-    title = "Bloom Day vs. Latent Factor Scores",
-    x = "Bloom Day of Year",
-    y = "Latent Factor Score",
-    color = "Location"
+ggplot(latent_clean, aes(x = bloom_doy, y = score, color = factor)) +
+  geom_point(alpha = 0.6, size = 2, na.rm = TRUE) +
+  geom_smooth(method = "lm", se = FALSE, linetype = "dashed", linewidth = 0.8, na.rm = TRUE) +
+  
+  # wrap long facet labels at ~12 characters
+  facet_grid(
+    location ~ factor,
+    scales  = "free_y",
+    switch  = "y",
+    labeller = labeller(location = label_wrap_gen(width = 12))
   ) +
-  theme_minimal()
-
-print(p)
-
+  
+  scale_color_brewer(palette = "Set1") +
+  labs(
+    title = "Latent Factor Scores vs Bloom Day by Location",
+    x     = "Bloom Day of Year",
+    y     = "Latent Score",
+    color = "Latent Factor"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(
+    # move the y-strips to the left side
+    strip.placement        = "outside",
+    # make left strip text horizontal and a bit smaller
+    strip.text.y.left      = element_text(angle = 0, size = 10, face = "bold", margin = margin(r = 6)),
+    # standard strip text for top
+    strip.text             = element_text(face = "bold"),
+    # tighten the panels
+    panel.spacing          = unit(0.6, "lines"),
+    # legend at bottom
+    legend.position        = "bottom",
+    # bold title
+    plot.title             = element_text(face = "bold", hjust = 0.5)
+  )
 ```
 
-Although our SPLS model was built on the combined dataset—ignoring that measurements come from five different sites with potentially different responses—I can still see some separation. For instance, the third latent factor reveals that different sites tend to occupy distinct regions in the factor space. This variability indicates that site-specific responses exist, which is why I ultimately use a generalized additive model (GAM) to flexibly capture these differences in our final analysis.
+Even though each latent factor shows an almost linear relationship with bloom day, you can see that the fitted lines for different sites sit at slightly different levels (and in some cases have different slopes). Those location-specific shifts tell us that bloom–weather relationships aren’t identical everywhere—so in the next step we’ll fit a GAM with separate smooths for each site to capture those nuances.
 
-### 11. Dynamic GAM Modeling for Forecasting
+### Dynamic GAM Modeling for Forecasting
 
 **Dynamic GAM Modeling for Location-Specific Latent Factor Adaptation**
 
@@ -785,9 +645,17 @@ summary(model_shared_sz, include_betas = FALSE)
 gratia::draw(model_shared_sz, trend_effects=TRUE)
 ```
 
-The enhanced sampling and shared observation parameters completely fixed our convergence issues. All parameters now have excellent effective sample sizes and Rhat values of 1.00. The shared observation error settled at about 3.2 days (pretty much as MAE of joint SPLS model) - this represents how much our weather-based predictions typically miss the actual bloom dates. Looking at the smooth effects, the main patterns are beautifully linear, exactly as expected from our SPLS-derived factors. Each latent factor shows a strong linear relationship with bloom timing (all p \< 0.001). The location-specific deviations (s(series,latent) terms) aren't statistically significant, which isn't surprising given our limited data. However, they still capture subtle location-specific responses that contribute to more accurate predictions.
+The enhanced sampling and shared observation parameters completely fixed our convergence issues. All parameters now have excellent effective sample sizes and Rhat values of 1.00. The shared observation error settled at about 3.2 days (pretty much as MAE of joint SPLS model) - this represents how much our weather-based predictions typically miss the actual bloom dates. Looking at the smooth effects, the main patterns are beautifully linear, exactly as expected from our SPLS-derived factors. Each latent factor shows a strong linear relationship with bloom timing (all p \< 0.001). The location-specific deviations (s(series,latent) terms) aren't statistically significant, which isn't surprising given our limited data. However, they still capture subtle location-specific responses that contribute to more accurate predictions. Lets look at series themselves:
 
-So lets now run predictions for 2025 and compare with real data.
+```{r}
+plot(model_shared_sz, type="forecast",trend_effects = TRUE,series=1)
+plot(model_shared_sz, type="forecast",trend_effects = TRUE,series=2)
+plot(model_shared_sz, type="forecast",trend_effects = TRUE,series=3)
+plot(model_shared_sz, type="forecast",trend_effects = TRUE,series=4)
+plot(model_shared_sz, type="forecast",trend_effects = TRUE,series=5)
+```
+
+Pretty groowy. So lets now run predictions for 2025 and compare with real data.
 
 ```{r, fig.width=10, fig.height=8}
 # Forecast
@@ -854,55 +722,71 @@ summary_stats <- draws_df %>%
   )
 
 # Create the plot
+# Define a unified fill palette (you can swap in your custom hexes if you prefer)
+palette5 <- RColorBrewer::brewer.pal(5, "Set1")
+
+# Clean data if needed (optional defensive step)
+draws_df_clean <- draws_df %>% filter(is.finite(value))
+summary_stats_clean <- summary_stats %>% filter(is.finite(actual_doy))
+
 p_presentation <- ggplot() +
-  # Density plots
-  geom_density(data = draws_df, 
-               aes(x = value, fill = location_full), 
-               alpha = 0.8,
-               color = "white",
-               linewidth = 0.5) +
-  
-  # Actual date lines
-  geom_segment(data = summary_stats,
-               aes(x = actual_doy, xend = actual_doy, y = 0, yend = Inf),
-               color = "black", 
-               linewidth = 1.5,
-               linetype = "solid") +
-  
-  # Error labels
-  geom_label(data = summary_stats,
-             aes(x = actual_doy + 2, y = Inf, 
-                 label = ifelse(diff == 0, "Spot on!", diff_text)),
-             vjust = 1.5,
-             size = 3,
-             fontface = "bold",
-             fill = "white",
-             alpha = 0.9,
-             label.padding = unit(0.25, "lines"),
-             label.size = 0.3) +
-  
+  # Density curves
+  geom_density(
+    data    = draws_df_clean,
+    aes(x = value, fill = location_full),
+    alpha   = 0.8,
+    color   = "white",
+    linewidth = 0.5,
+    na.rm   = TRUE
+  ) +
+  # Vertical line at actual bloom date
+  geom_segment(
+    data = summary_stats_clean,
+    aes(x = actual_doy, xend = actual_doy, y = 0, yend = Inf),
+    color    = "black",
+    linewidth = 1.2
+  ) +
+  # Label with error text
+  geom_label(
+    data = summary_stats_clean,
+    aes(x = actual_doy + 2, y = Inf, label = ifelse(diff == 0, "Spot on!", diff_text)),
+    vjust         = 1.5,
+    size          = 3.2,
+    fontface      = "bold",
+    fill          = "white",
+    alpha         = 0.9,
+    label.padding = unit(0.2, "lines"),
+    label.size    = 0.25,
+    na.rm         = TRUE
+  ) +
+  # Facet by location
   facet_wrap(~ location_full, scales = "free_y", nrow = 1) +
-  scale_fill_manual(values = c("#2E7D32", "#1976D2", "#D32F2F", "#7B1FA2", "#F57C00")) +
-  coord_cartesian(xlim = c(78, 112)) +  # This prevents cutting off distributions
+  # Unified fill palette
+  scale_fill_manual(values = palette5) +
+  # X axis limits and breaks
+  coord_cartesian(xlim = c(78, 112)) +
   scale_x_continuous(breaks = seq(80, 110, by = 10)) +
-  
-  labs(title = "2025 Cherry Blossom Predictions vs Reality",
-       x = "Day of Year (vertical line = actual bloom date)",
-       y = "") +
-  
-  theme_minimal() +
+  # Labels
+  labs(
+    title = "2025 Cherry Blossom Predictions vs Reality",
+    x     = "Day of Year\n(vertical line = actual bloom date)",
+    y     = NULL
+  ) +
+  # Unified theme
+  theme_minimal(base_size = 13) +
   theme(
-    legend.position = "none",
-    plot.title = element_text(size = 16, face = "bold", hjust = 0.5),
-    strip.text = element_text(size = 11, face = "bold"),
-    axis.text.y = element_blank(),
-    axis.text.x = element_text(size = 9),
-    panel.grid = element_blank(),
-    panel.spacing = unit(0.5, "lines"),
-    plot.margin = margin(15, 15, 15, 15)
+    plot.title       = element_text(face = "bold", size = 16, hjust = 0.5),
+    strip.text       = element_text(face = "bold", size = 11),
+    axis.text.x      = element_text(size = 9),
+    axis.text.y      = element_blank(),
+    axis.ticks.y     = element_blank(),
+    panel.grid.major = element_line(color = "grey85", size = 0.3),
+    panel.grid.minor = element_blank(),
+    panel.spacing    = unit(0.6, "lines"),
+    legend.position  = "none",
+    plot.margin      = margin(12, 12, 12, 12)
   )
 
-# Display the plot
 print(p_presentation)
 ```
 
