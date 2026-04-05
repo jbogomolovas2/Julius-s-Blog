@@ -9,12 +9,15 @@ website:
   site-url: https://jbogomolovas2.github.io/Julius-s-Blog/
   open-graph: true
   twitter-card: true
+  favicon: profile.jpg
   
   navbar:
     right:
       - icon: rss
         href: index.xml
       - about.qmd
+      - text: R-bloggers
+        href: https://www.r-bloggers.com
       - icon: github
         href: https://github.com/jbogomolovas2
       - icon: twitter
