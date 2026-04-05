@@ -6,6 +6,7 @@ listing:
     categories: "R"
   feed:
     title: "Julius's Blog - R Posts"
+    type: full
   type: default
 page-layout: full
 ---
