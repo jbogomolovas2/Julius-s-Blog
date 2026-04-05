@@ -1,0 +1,70 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss  xmlns:atom="http://www.w3.org/2005/Atom" 
+      xmlns:media="http://search.yahoo.com/mrss/" 
+      xmlns:content="http://purl.org/rss/1.0/modules/content/" 
+      xmlns:dc="http://purl.org/dc/elements/1.1/" 
+      version="2.0">
+<channel>
+<title>Julius&#39;s Blog</title>
+<link>https://jbogomolovas2.github.io/Julius-s-Blog/</link>
+<atom:link href="https://jbogomolovas2.github.io/Julius-s-Blog/index.xml" rel="self" type="application/rss+xml"/>
+<description>Data Analytics, Biology, and R Programming</description>
+<image>
+<url>https://jbogomolovas2.github.io/Julius-s-Blog/profile.jpg</url>
+<title>Julius&#39;s Blog</title>
+<link>https://jbogomolovas2.github.io/Julius-s-Blog/</link>
+</image>
+<generator>quarto-1.7.32</generator>
+<lastBuildDate>Sat, 04 Apr 2026 07:00:00 GMT</lastBuildDate>
+<item>
+  <title>{B4F502887207:/posts/swim-css-pipeline/index.html}</title>
+  <dc:creator>Julius Bogomolovas</dc:creator>
+  <link>https://jbogomolovas2.github.io/Julius-s-Blog/posts/swim-css-pipeline/</link>
+  <description>{B4F502887207:/posts/swim-css-pipeline/index.html}</description>
+  <category>R</category>
+  <category>GAM</category>
+  <category>Sports Analytics</category>
+  <category>Swimming</category>
+  <category>Time Series</category>
+  <guid>https://jbogomolovas2.github.io/Julius-s-Blog/posts/swim-css-pipeline/</guid>
+  <pubDate>Sat, 04 Apr 2026 07:00:00 GMT</pubDate>
+  <media:content url="https://jbogomolovas2.github.io/Julius-s-Blog/posts/swim-css-pipeline/IMG_9057.JPG" medium="image"/>
+</item>
+<item>
+  <title>{B4F502887207:/posts/cherry_post/index.html}</title>
+  <dc:creator>Julijus Bogomolovas</dc:creator>
+  <link>https://jbogomolovas2.github.io/Julius-s-Blog/posts/cherry_post/</link>
+  <description>{B4F502887207:/posts/cherry_post/index.html}</description>
+  <category>R</category>
+  <category>Phenology</category>
+  <category>Time Series Analysis</category>
+  <category>Machine Learning</category>
+  <guid>https://jbogomolovas2.github.io/Julius-s-Blog/posts/cherry_post/</guid>
+  <pubDate>Mon, 07 Jul 2025 07:00:00 GMT</pubDate>
+  <media:content url="https://jbogomolovas2.github.io/Julius-s-Blog/posts/cherry_post/blossom.png" medium="image" type="image/png" height="96" width="144"/>
+</item>
+<item>
+  <title>{B4F502887207:/posts/post-with-code/index.html}</title>
+  <dc:creator>Julius Bogomolovas</dc:creator>
+  <link>https://jbogomolovas2.github.io/Julius-s-Blog/posts/post-with-code/</link>
+  <description>{B4F502887207:/posts/post-with-code/index.html}</description>
+  <category>R</category>
+  <category>GAM</category>
+  <category>Sports Analytics</category>
+  <category>Data Visualization</category>
+  <guid>https://jbogomolovas2.github.io/Julius-s-Blog/posts/post-with-code/</guid>
+  <pubDate>Mon, 23 Jun 2025 07:00:00 GMT</pubDate>
+  <media:content url="https://jbogomolovas2.github.io/Julius-s-Blog/posts/post-with-code/image.jpg" medium="image" type="image/jpeg"/>
+</item>
+<item>
+  <title>{B4F502887207:/posts/welcome/index.html}</title>
+  <dc:creator>Julius Bogomolovas</dc:creator>
+  <link>https://jbogomolovas2.github.io/Julius-s-Blog/posts/welcome/</link>
+  <description>{B4F502887207:/posts/welcome/index.html}</description>
+  <category>news</category>
+  <guid>https://jbogomolovas2.github.io/Julius-s-Blog/posts/welcome/</guid>
+  <pubDate>Fri, 20 Jun 2025 07:00:00 GMT</pubDate>
+  <media:content url="https://jbogomolovas2.github.io/Julius-s-Blog/posts/welcome/thumbnail.jpg" medium="image" type="image/jpeg"/>
+</item>
+</channel>
+</rss>

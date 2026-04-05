@@ -1,0 +1,10 @@
+---
+title: "R Posts"
+listing:
+  contents: posts
+  categories: [R]
+  feed:
+    title: "Julius's Blog - R Posts"
+  type: default
+page-layout: full
+---
