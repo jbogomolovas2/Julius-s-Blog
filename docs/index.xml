@@ -15,7 +15,3368 @@
 <link>https://jbogomolovas2.github.io/Julius-s-Blog/</link>
 </image>
 <generator>quarto-1.7.32</generator>
-<lastBuildDate>Mon, 07 Jul 2025 07:00:00 GMT</lastBuildDate>
+<lastBuildDate>Sat, 04 Apr 2026 07:00:00 GMT</lastBuildDate>
+<item>
+  <title>What’s Your Base? Estimating Swimming Fitness from Routine Training Data</title>
+  <dc:creator>Julius Bogomolovas</dc:creator>
+  <link>https://jbogomolovas2.github.io/Julius-s-Blog/posts/swim-css-pipeline/</link>
+  <description><![CDATA[ 
+
+
+
+
+
+<section id="the-question-every-swimmer-gets-asked" class="level2">
+<h2 class="anchored" data-anchor-id="the-question-every-swimmer-gets-asked">The Question Every Swimmer Gets Asked</h2>
+<p>I swim a lot, and like most swimmers, I am a little obsessive about tracking progress.</p>
+<p>Garmin is great in many ways, but when it comes to swimming, the readouts are a bit underwhelming. You get average pace, effort score, SWOLF, and a few other summary numbers, but none of them really answer the question swimmers actually care about: how fast am I, really, right now?</p>
+<p>There are formal ways to get at that. You can do time trials, swim a CSS test, or race. But those are just occasional snapshots. What I wanted was something more automatic: some kind of session-by-session measure that tells me how fast, or how fit, I was swimming in an ordinary workout.</p>
+<p>In swimming, that idea is usually captured by base pace. If you join a masters team, one of the first questions people ask is: what’s your base? Roughly speaking, it is the pace you can hold steadily for repeat 100s on short rest. Not easy, not all-out, just your solid training pace. It is close to CSS, usually a bit slower, and it is one of the most practical ways swimmers think about fitness.</p>
+<p>So I started wondering: could I estimate something like that automatically from routine workout data?</p>
+<p>That is harder than it sounds, because swim workouts are messy on purpose. Within a single session you swim at different efforts, different distances, with different rest, and at different stages of fatigue. Sometimes you are sprinting, sometimes cruising, sometimes just surviving the set. So the average pace Garmin gives you is not really a fitness metric. It is heavily shaped by the structure of the workout itself.</p>
+<p>That was really the whole motivation for this project.</p>
+<p>In a <a href="../post-with-code/index.html">previous post</a>, I showed that GAMs can do a pretty good job modeling swim speed from workout structure and pulling out broad trends over time. That was a useful first step, but it still had a big limitation: it could not really separate swimming slow because I was tired from swimming slow because I was intentionally taking it easy. Effort and fitness were still tangled together.</p>
+<p>This post is my attempt to go one step further. The idea is to use GAMs to tease apart lap speed by accounting for the main things that distort it — repeat length, position within a rep, accumulated fatigue, rest, stroke rate, heart rate, and so on — and then smooth the cleaned-up signal over time to get an estimate of base pace.</p>
+<p>And because any homemade metric needs some kind of reality check, I have a couple of built-in positive controls. During this period I was training consistently toward the La Jolla Rough Water Swim relay on September 27, 2025, so if this metric is capturing something real, I should be getting faster into that race. I also had a stretch in spring 2025 when I was training with a swim buddy, which reliably made me swim harder and better than usual. So, at the very least, I would hope this thing can detect those signals and not just produce a fancy-looking curve.</p>
+<p>In other words, the goal here is pretty simple: take messy routine swim data and turn it into a number swimmers already understand intuitively — a proxy for how fast, or how fit, I really was in a given session.</p>
+</section>
+<section id="the-pipeline-at-a-glance" class="level2">
+<h2 class="anchored" data-anchor-id="the-pipeline-at-a-glance">The Pipeline at a Glance</h2>
+<p>The pipeline has two stages, each built around a generalized additive model:</p>
+<ol type="1">
+<li><strong>Structural GAM</strong> — reduces the influence of within-session mechanics (pacing, fatigue, rest, pool length) and effort (stroke rate, heart rate) on raw speed</li>
+<li><strong>Density surface GAM</strong> — smooths the adjusted pace distribution over calendar time, with peak extraction via parabolic interpolation</li>
+</ol>
+<p>The output is a continuous fitness curve expressed in pace per 100 yards — the unit swimmers think in.</p>
+</section>
+<section id="data" class="level2">
+<h2 class="anchored" data-anchor-id="data">Data</h2>
+<section id="fit-file-extraction" class="level3">
+<h3 class="anchored" data-anchor-id="fit-file-extraction">FIT File Extraction</h3>
+<p>All data comes from Garmin FIT files recorded during pool swimming sessions, read via the <code>FITfileR</code> package <span class="citation" data-cites="FITfileR">(Smith 2025)</span>. The extraction pulls three message types per file: session-level metadata (date, pool length), per-length timing and stroke data, and per-lap heart rate. The full extraction runs in parallel across 7 cores and takes a few minutes.</p>
+<div class="cell">
+<details class="code-fold">
+<summary>Block 1: FIT file extraction (not evaluated — requires local FIT files)</summary>
+<div class="sourceCode cell-code" id="cb1" style="background: #f1f3f5;"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb1-1"><span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">library</span>(FITfileR)</span>
+<span id="cb1-2"><span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">library</span>(dplyr)</span>
+<span id="cb1-3"><span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">library</span>(tidyr)</span>
+<span id="cb1-4"><span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">library</span>(future.apply)</span>
+<span id="cb1-5"></span>
+<span id="cb1-6">fit_dir    <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"path/to/your/FIT/files"</span></span>
+<span id="cb1-7">cache_file <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"swim_data.rds"</span></span>
+<span id="cb1-8">n_workers  <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> parallelly<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">::</span><span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">availableCores</span>() <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">-</span> <span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">1</span></span>
+<span id="cb1-9"></span>
+<span id="cb1-10">pool_fits <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">list.files</span>(fit_dir, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">pattern =</span> <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"</span><span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">\\</span><span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">.fit$"</span>,</span>
+<span id="cb1-11">                        <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">full.names =</span> <span class="cn" style="color: #8f5902;
+background-color: null;
+font-style: inherit;">TRUE</span>, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">recursive =</span> <span class="cn" style="color: #8f5902;
+background-color: null;
+font-style: inherit;">TRUE</span>)</span>
+<span id="cb1-12"></span>
+<span id="cb1-13">extract_fit <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> <span class="cf" style="color: #003B4F;
+background-color: null;
+font-weight: bold;
+font-style: inherit;">function</span>(f) {</span>
+<span id="cb1-14">  fit <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">tryCatch</span>(<span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">readFitFile</span>(f), <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">error =</span> <span class="cf" style="color: #003B4F;
+background-color: null;
+font-weight: bold;
+font-style: inherit;">function</span>(e) <span class="cn" style="color: #8f5902;
+background-color: null;
+font-style: inherit;">NULL</span>)</span>
+<span id="cb1-15">  <span class="cf" style="color: #003B4F;
+background-color: null;
+font-weight: bold;
+font-style: inherit;">if</span> (<span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">is.null</span>(fit)) <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">return</span>(<span class="cn" style="color: #8f5902;
+background-color: null;
+font-style: inherit;">NULL</span>)</span>
+<span id="cb1-16">  </span>
+<span id="cb1-17">  out <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">list</span>(<span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">session =</span> <span class="cn" style="color: #8f5902;
+background-color: null;
+font-style: inherit;">NULL</span>, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">lengths =</span> <span class="cn" style="color: #8f5902;
+background-color: null;
+font-style: inherit;">NULL</span>, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">lap_info =</span> <span class="cn" style="color: #8f5902;
+background-color: null;
+font-style: inherit;">NULL</span>)</span>
+<span id="cb1-18">  </span>
+<span id="cb1-19">  <span class="co" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;"># Session metadata</span></span>
+<span id="cb1-20">  sess <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">tryCatch</span>(<span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">getMessagesByType</span>(fit, <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"session"</span>), <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">error =</span> <span class="cf" style="color: #003B4F;
+background-color: null;
+font-weight: bold;
+font-style: inherit;">function</span>(e) <span class="cn" style="color: #8f5902;
+background-color: null;
+font-style: inherit;">NULL</span>)</span>
+<span id="cb1-21">  <span class="cf" style="color: #003B4F;
+background-color: null;
+font-weight: bold;
+font-style: inherit;">if</span> (<span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">is.null</span>(sess) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">||</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">nrow</span>(sess) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">==</span> <span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">0</span> <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">||</span> <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">!</span><span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"pool_length"</span> <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">%in%</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">names</span>(sess)) <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">return</span>(<span class="cn" style="color: #8f5902;
+background-color: null;
+font-style: inherit;">NULL</span>)</span>
+<span id="cb1-22">  </span>
+<span id="cb1-23">  pl <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> sess<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">$</span>pool_length[<span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">1</span>]</span>
+<span id="cb1-24">  <span class="cf" style="color: #003B4F;
+background-color: null;
+font-weight: bold;
+font-style: inherit;">if</span> (<span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">is.na</span>(pl) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">||</span> pl <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">&lt;=</span> <span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">0</span>) <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">return</span>(<span class="cn" style="color: #8f5902;
+background-color: null;
+font-style: inherit;">NULL</span>)</span>
+<span id="cb1-25">  </span>
+<span id="cb1-26">  out<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">$</span>session <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">data.frame</span>(</span>
+<span id="cb1-27">    <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">file         =</span> f,</span>
+<span id="cb1-28">    <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">session_date =</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">as.Date</span>(sess<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">$</span>start_time[<span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">1</span>]),</span>
+<span id="cb1-29">    <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">pool_length  =</span> pl,</span>
+<span id="cb1-30">    <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">avg_hr_session =</span> <span class="cf" style="color: #003B4F;
+background-color: null;
+font-weight: bold;
+font-style: inherit;">if</span> (<span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"avg_heart_rate"</span> <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">%in%</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">names</span>(sess)) sess<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">$</span>avg_heart_rate[<span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">1</span>] <span class="cf" style="color: #003B4F;
+background-color: null;
+font-weight: bold;
+font-style: inherit;">else</span> <span class="cn" style="color: #8f5902;
+background-color: null;
+font-style: inherit;">NA_integer_</span>,</span>
+<span id="cb1-31">    <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">max_hr_session =</span> <span class="cf" style="color: #003B4F;
+background-color: null;
+font-weight: bold;
+font-style: inherit;">if</span> (<span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"max_heart_rate"</span> <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">%in%</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">names</span>(sess)) sess<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">$</span>max_heart_rate[<span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">1</span>] <span class="cf" style="color: #003B4F;
+background-color: null;
+font-weight: bold;
+font-style: inherit;">else</span> <span class="cn" style="color: #8f5902;
+background-color: null;
+font-style: inherit;">NA_integer_</span>,</span>
+<span id="cb1-32">    <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">stringsAsFactors =</span> <span class="cn" style="color: #8f5902;
+background-color: null;
+font-style: inherit;">FALSE</span></span>
+<span id="cb1-33">  )</span>
+<span id="cb1-34">  </span>
+<span id="cb1-35">  <span class="co" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;"># Per-length data</span></span>
+<span id="cb1-36">  lens <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">tryCatch</span>(<span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">getMessagesByType</span>(fit, <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"length"</span>), <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">error =</span> <span class="cf" style="color: #003B4F;
+background-color: null;
+font-weight: bold;
+font-style: inherit;">function</span>(e) <span class="cn" style="color: #8f5902;
+background-color: null;
+font-style: inherit;">NULL</span>)</span>
+<span id="cb1-37">  <span class="cf" style="color: #003B4F;
+background-color: null;
+font-weight: bold;
+font-style: inherit;">if</span> (<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">!</span><span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">is.null</span>(lens) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">&amp;&amp;</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">nrow</span>(lens) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">&gt;</span> <span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">0</span>) {</span>
+<span id="cb1-38">    lens<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">$</span>file <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> f</span>
+<span id="cb1-39">    lens<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">$</span>length_index <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">seq_len</span>(<span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">nrow</span>(lens)) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">-</span> <span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">1</span>L</span>
+<span id="cb1-40">    out<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">$</span>lengths <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> lens</span>
+<span id="cb1-41">  }</span>
+<span id="cb1-42">  </span>
+<span id="cb1-43">  <span class="co" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;"># Lap-level HR (not available per-length in Garmin)</span></span>
+<span id="cb1-44">  laps <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">tryCatch</span>(<span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">getMessagesByType</span>(fit, <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"lap"</span>), <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">error =</span> <span class="cf" style="color: #003B4F;
+background-color: null;
+font-weight: bold;
+font-style: inherit;">function</span>(e) <span class="cn" style="color: #8f5902;
+background-color: null;
+font-style: inherit;">NULL</span>)</span>
+<span id="cb1-45">  <span class="cf" style="color: #003B4F;
+background-color: null;
+font-weight: bold;
+font-style: inherit;">if</span> (<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">!</span><span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">is.null</span>(laps) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">&amp;&amp;</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">nrow</span>(laps) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">&gt;</span> <span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">0</span> <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">&amp;&amp;</span></span>
+<span id="cb1-46">      <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"first_length_index"</span> <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">%in%</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">names</span>(laps) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">&amp;&amp;</span></span>
+<span id="cb1-47">      <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"num_lengths"</span> <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">%in%</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">names</span>(laps)) {</span>
+<span id="cb1-48">    </span>
+<span id="cb1-49">    real_laps <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> laps <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">%&gt;%</span></span>
+<span id="cb1-50">      <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">filter</span>(first_length_index <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">&lt;</span> <span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">65535</span>, num_lengths <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">&gt;</span> <span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">0</span>)</span>
+<span id="cb1-51">    </span>
+<span id="cb1-52">    <span class="cf" style="color: #003B4F;
+background-color: null;
+font-weight: bold;
+font-style: inherit;">if</span> (<span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">nrow</span>(real_laps) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">&gt;</span> <span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">0</span>) {</span>
+<span id="cb1-53">      rows <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">vector</span>(<span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"list"</span>, <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">nrow</span>(real_laps))</span>
+<span id="cb1-54">      <span class="cf" style="color: #003B4F;
+background-color: null;
+font-weight: bold;
+font-style: inherit;">for</span> (i <span class="cf" style="color: #003B4F;
+background-color: null;
+font-weight: bold;
+font-style: inherit;">in</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">seq_len</span>(<span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">nrow</span>(real_laps))) {</span>
+<span id="cb1-55">        rl <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> real_laps[i, ]</span>
+<span id="cb1-56">        fi <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">as.integer</span>(rl<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">$</span>first_length_index)</span>
+<span id="cb1-57">        nl <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">as.integer</span>(rl<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">$</span>num_lengths)</span>
+<span id="cb1-58">        rows[[i]] <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">data.frame</span>(</span>
+<span id="cb1-59">          <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">file         =</span> f,</span>
+<span id="cb1-60">          <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">length_index =</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">seq</span>(fi, fi <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">+</span> nl <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">-</span> <span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">1</span>L),</span>
+<span id="cb1-61">          <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">avg_hr =</span> <span class="cf" style="color: #003B4F;
+background-color: null;
+font-weight: bold;
+font-style: inherit;">if</span> (<span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"avg_heart_rate"</span> <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">%in%</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">names</span>(rl)) <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">as.numeric</span>(rl<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">$</span>avg_heart_rate) <span class="cf" style="color: #003B4F;
+background-color: null;
+font-weight: bold;
+font-style: inherit;">else</span> <span class="cn" style="color: #8f5902;
+background-color: null;
+font-style: inherit;">NA_real_</span>,</span>
+<span id="cb1-62">          <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">max_hr =</span> <span class="cf" style="color: #003B4F;
+background-color: null;
+font-weight: bold;
+font-style: inherit;">if</span> (<span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"max_heart_rate"</span> <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">%in%</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">names</span>(rl)) <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">as.numeric</span>(rl<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">$</span>max_heart_rate) <span class="cf" style="color: #003B4F;
+background-color: null;
+font-weight: bold;
+font-style: inherit;">else</span> <span class="cn" style="color: #8f5902;
+background-color: null;
+font-style: inherit;">NA_real_</span>,</span>
+<span id="cb1-63">          <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">stringsAsFactors =</span> <span class="cn" style="color: #8f5902;
+background-color: null;
+font-style: inherit;">FALSE</span></span>
+<span id="cb1-64">        )</span>
+<span id="cb1-65">      }</span>
+<span id="cb1-66">      out<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">$</span>lap_info <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">bind_rows</span>(rows)</span>
+<span id="cb1-67">    }</span>
+<span id="cb1-68">  }</span>
+<span id="cb1-69">  </span>
+<span id="cb1-70">  out</span>
+<span id="cb1-71">}</span>
+<span id="cb1-72"></span>
+<span id="cb1-73"><span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">plan</span>(multisession, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">workers =</span> n_workers)</span>
+<span id="cb1-74">results <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">future_lapply</span>(pool_fits, extract_fit,</span>
+<span id="cb1-75">                         <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">future.seed =</span> <span class="cn" style="color: #8f5902;
+background-color: null;
+font-style: inherit;">NULL</span>,</span>
+<span id="cb1-76">                         <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">future.packages =</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">c</span>(<span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"FITfileR"</span>, <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"dplyr"</span>))</span>
+<span id="cb1-77"><span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">plan</span>(sequential)</span>
+<span id="cb1-78"></span>
+<span id="cb1-79">sessions_raw <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">bind_rows</span>(<span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">lapply</span>(results, <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">`</span><span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">[[</span><span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">`</span>, <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"session"</span>))</span>
+<span id="cb1-80">lengths_raw  <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">bind_rows</span>(<span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">lapply</span>(results, <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">`</span><span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">[[</span><span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">`</span>, <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"lengths"</span>))</span>
+<span id="cb1-81">lap_info     <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">bind_rows</span>(<span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">lapply</span>(results, <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">`</span><span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">[[</span><span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">`</span>, <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"lap_info"</span>))</span>
+<span id="cb1-82"></span>
+<span id="cb1-83"><span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">saveRDS</span>(<span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">list</span>(<span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">sessions_raw =</span> sessions_raw,</span>
+<span id="cb1-84">             <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">lengths_raw  =</span> lengths_raw,</span>
+<span id="cb1-85">             <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">lap_info     =</span> lap_info), cache_file)</span></code></pre></div>
+</details>
+</div>
+<p>The cached extraction (<code>swim_data.rds</code>, 381 KB) is available in this post’s directory for reproducibility. Everything below runs from this file.</p>
+<div class="cell">
+<details class="code-fold">
+<summary>Load cached data and build predictor table</summary>
+<div class="sourceCode cell-code" id="cb2" style="background: #f1f3f5;"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb2-1"><span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">library</span>(mgcv)</span>
+<span id="cb2-2"><span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">library</span>(dplyr)</span>
+<span id="cb2-3"><span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">library</span>(tidyr)</span>
+<span id="cb2-4"><span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">library</span>(ggplot2)</span>
+<span id="cb2-5"><span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">library</span>(patchwork)</span>
+<span id="cb2-6"><span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">library</span>(gratia)</span>
+<span id="cb2-7"></span>
+<span id="cb2-8"><span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">theme_set</span>(<span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">theme_minimal</span>(<span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">base_size =</span> <span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">11</span>))</span>
+<span id="cb2-9"></span>
+<span id="cb2-10"><span class="co" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;"># Load cached extraction</span></span>
+<span id="cb2-11">cached <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">readRDS</span>(<span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"swim_data.rds"</span>)</span>
+<span id="cb2-12">sessions_raw <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> cached<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">$</span>sessions_raw</span>
+<span id="cb2-13">lengths_raw  <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> cached<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">$</span>lengths_raw</span>
+<span id="cb2-14">lap_info     <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> cached<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">$</span>lap_info</span>
+<span id="cb2-15"></span>
+<span id="cb2-16"><span class="co" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;"># Join lengths with lap-level HR</span></span>
+<span id="cb2-17">lengths_joined <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> lengths_raw <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">%&gt;%</span></span>
+<span id="cb2-18">  <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">left_join</span>(lap_info, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">by =</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">c</span>(<span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"file"</span>, <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"length_index"</span>)) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">%&gt;%</span></span>
+<span id="cb2-19">  <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">left_join</span>(sessions_raw, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">by =</span> <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"file"</span>)</span></code></pre></div>
+</details>
+</div>
+</section>
+<section id="building-the-predictor-table" class="level3">
+<h3 class="anchored" data-anchor-id="building-the-predictor-table">Building the Predictor Table</h3>
+<p>Each active, non-drill length becomes one row with the following predictors:</p>
+<div class="cell">
+<details class="code-fold">
+<summary>Block 3: Compute predictors — one row per active length</summary>
+<div class="sourceCode cell-code" id="cb3" style="background: #f1f3f5;"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb3-1"><span class="co" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;"># Rep detection: consecutive active lengths between idle rows form one rep</span></span>
+<span id="cb3-2">laps_all <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> lengths_joined <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">%&gt;%</span></span>
+<span id="cb3-3">  <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">group_by</span>(file) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">%&gt;%</span></span>
+<span id="cb3-4">  <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">arrange</span>(file, start_time) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">%&gt;%</span></span>
+<span id="cb3-5">  <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">mutate</span>(</span>
+<span id="cb3-6">    <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">row_id =</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">row_number</span>(),</span>
+<span id="cb3-7">    <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">rep_id =</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">cumsum</span>(<span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">lag</span>(length_type, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">default =</span> <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"active"</span>) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">==</span> <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"idle"</span>) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">+</span> <span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">1</span></span>
+<span id="cb3-8">  ) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">%&gt;%</span></span>
+<span id="cb3-9">  <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">ungroup</span>()</span>
+<span id="cb3-10"></span>
+<span id="cb3-11"><span class="co" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;"># Rest durations from idle rows</span></span>
+<span id="cb3-12">rest_durations <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> laps_all <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">%&gt;%</span></span>
+<span id="cb3-13">  <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">filter</span>(length_type <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">==</span> <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"idle"</span>) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">%&gt;%</span></span>
+<span id="cb3-14">  <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">group_by</span>(file) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">%&gt;%</span></span>
+<span id="cb3-15">  <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">mutate</span>(<span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">next_rep_id =</span> rep_id <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">+</span> <span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">1</span>,</span>
+<span id="cb3-16">         <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">rest_seconds =</span> total_elapsed_time) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">%&gt;%</span></span>
+<span id="cb3-17">  <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">ungroup</span>() <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">%&gt;%</span></span>
+<span id="cb3-18">  <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">select</span>(file, next_rep_id, rest_seconds)</span>
+<span id="cb3-19"></span>
+<span id="cb3-20"><span class="co" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;"># Build the full predictor table</span></span>
+<span id="cb3-21">laps_all <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> laps_all <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">%&gt;%</span></span>
+<span id="cb3-22">  <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">filter</span>(length_type <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">==</span> <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"active"</span>,</span>
+<span id="cb3-23">         <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">!</span><span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">is.na</span>(swim_stroke), swim_stroke <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">!=</span> <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">""</span>,</span>
+<span id="cb3-24">         swim_stroke <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">!=</span> <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"drill"</span>) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">%&gt;%</span></span>
+<span id="cb3-25">  <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">group_by</span>(file, rep_id) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">%&gt;%</span></span>
+<span id="cb3-26">  <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">mutate</span>(<span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">lap_in_rep =</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">row_number</span>(), <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">rep_size =</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">n</span>()) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">%&gt;%</span></span>
+<span id="cb3-27">  <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">ungroup</span>() <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">%&gt;%</span></span>
+<span id="cb3-28">  <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">left_join</span>(rest_durations, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">by =</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">c</span>(<span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"file"</span>, <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"rep_id"</span> <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">=</span> <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"next_rep_id"</span>)) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">%&gt;%</span></span>
+<span id="cb3-29">  <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">group_by</span>(file) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">%&gt;%</span></span>
+<span id="cb3-30">  <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">arrange</span>(file, row_id) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">%&gt;%</span></span>
+<span id="cb3-31">  <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">mutate</span>(</span>
+<span id="cb3-32">    <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">speed          =</span> pool_length <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">/</span> total_elapsed_time,</span>
+<span id="cb3-33">    <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">cum_distance   =</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">cumsum</span>(pool_length),</span>
+<span id="cb3-34">    <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">pos_mid        =</span> (lap_in_rep <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">-</span> <span class="fl" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">0.5</span>) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">/</span> rep_size,</span>
+<span id="cb3-35">    <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">rep_length     =</span> rep_size <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">*</span> pool_length,</span>
+<span id="cb3-36">    <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">log_rep_length =</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">log</span>(rep_length),</span>
+<span id="cb3-37">    <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">rest_before    =</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">if_else</span>(lap_in_rep <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">==</span> <span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">1</span> <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">&amp;</span> <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">!</span><span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">is.na</span>(rest_seconds),</span>
+<span id="cb3-38">                             rest_seconds, <span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">0</span>),</span>
+<span id="cb3-39">    <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">rest_before    =</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">if_else</span>(lap_in_rep <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">==</span> <span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">1</span> <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">&amp;</span> rep_id <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">==</span> <span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">1</span>, <span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">60</span>, rest_before),</span>
+<span id="cb3-40">    <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">log1p_rest     =</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">log1p</span>(rest_before),</span>
+<span id="cb3-41">    <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">stroke_rate    =</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">if_else</span>(total_strokes <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">&gt;</span> <span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">0</span> <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">&amp;</span> <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">!</span><span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">is.na</span>(total_strokes),</span>
+<span id="cb3-42">                             total_strokes <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">/</span> total_elapsed_time, <span class="cn" style="color: #8f5902;
+background-color: null;
+font-style: inherit;">NA_real_</span>),</span>
+<span id="cb3-43">    <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">dps            =</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">if_else</span>(<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">!</span><span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">is.na</span>(total_strokes) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">&amp;</span> total_strokes <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">&gt;</span> <span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">0</span>,</span>
+<span id="cb3-44">                             pool_length <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">/</span> total_strokes, <span class="cn" style="color: #8f5902;
+background-color: null;
+font-style: inherit;">NA_real_</span>)</span>
+<span id="cb3-45">  ) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">%&gt;%</span></span>
+<span id="cb3-46">  <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">ungroup</span>() <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">%&gt;%</span></span>
+<span id="cb3-47">  <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">mutate</span>(</span>
+<span id="cb3-48">    <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">session_id   =</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">factor</span>(<span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">paste</span>(session_date, file, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">sep =</span> <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"|"</span>)),</span>
+<span id="cb3-49">    <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">session_date =</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">as.Date</span>(session_date),</span>
+<span id="cb3-50">    <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">swim_stroke  =</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">factor</span>(swim_stroke)</span>
+<span id="cb3-51">  )</span>
+<span id="cb3-52"></span>
+<span id="cb3-53"><span class="co" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;"># Quality filter</span></span>
+<span id="cb3-54">laps_clean <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> laps_all <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">%&gt;%</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">filter</span>(speed <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">&gt;</span> <span class="fl" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">0.3</span>, speed <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">&lt;</span> <span class="fl" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">2.5</span>)</span></code></pre></div>
+</details>
+</div>
+<div class="cell">
+<div class="cell-output cell-output-stdout">
+<pre><code>Dataset: 14933 lengths | 203 sessions | 2024-08-16 to 2026-03-26 </code></pre>
+</div>
+<div class="cell-output cell-output-stdout">
+<pre><code>Lengths per stroke:</code></pre>
+</div>
+<div class="cell-output cell-output-stdout">
+<pre><code># A tibble: 4 × 2
+  swim_stroke      n
+  &lt;fct&gt;        &lt;int&gt;
+1 freestyle    11407
+2 breaststroke  1398
+3 backstroke    1242
+4 butterfly      886</code></pre>
+</div>
+</div>
+</section>
+<section id="predictor-definitions" class="level3">
+<h3 class="anchored" data-anchor-id="predictor-definitions">Predictor Definitions</h3>
+<p>The response variable is <strong>speed</strong> (m/s) = pool length / elapsed time, which is pool-length-independent by construction.</p>
+<p>The key predictors fall into two groups:</p>
+<p><strong>Structural predictors</strong> describe where each length sits within the workout:</p>
+<ul>
+<li><strong><code>pos_mid</code></strong> — normalized position within the interval, <img src="https://latex.codecogs.com/png.latex?(i%20-%200.5)%20/%20n">. A value near 0 is the first length, near 1 is the last.</li>
+<li><strong><code>log_rep_length</code></strong> — log of interval distance in meters. Log scale because the difference between a 50 m and 100 m is larger than between 250 m and 300 m.</li>
+<li><strong><code>cum_distance</code></strong> — running total of meters swum in the session so far.</li>
+<li><strong><code>log1p_rest</code></strong> — log(1 + rest seconds) before each interval. First lengths after a wall start get the preceding idle duration; mid-interval lengths get 0 (lengths that continue through the wall without stopping).</li>
+<li><strong><code>pool_length</code></strong> — pool length in meters (22.86 m for a 25-yard pool, 50 m for long course, etc.).</li>
+<li><strong><code>set_type</code></strong> — freestyle fraction of the interval, grouped into three levels: pure freestyle, mixed, and IM set. A freestyle length inside an IM set may behave differently from one in a pure freestyle set.</li>
+</ul>
+<p><strong>Effort predictors</strong> describe how hard the swimmer is working:</p>
+<ul>
+<li><strong><code>stroke_rate</code></strong> — strokes per second. In my data, distance per stroke is nearly flat overall (<img src="https://latex.codecogs.com/png.latex?r%20=%200.01">), so most of the speed variation appears to be driven by stroke rate.</li>
+<li><strong><code>avg_hr</code></strong> — average heart rate for the interval. The watch tracks HR continuously, but pool swimming FIT files only report it aggregated per interval. For a continuous 100 (4 lengths), all four lengths share the same HR value. This means HR distinguishes effort between intervals, while stroke rate captures effort variation within them. Correlation between the two is only 0.24, confirming independent information. Available for 81% of lengths; sessions without HR data are excluded.</li>
+</ul>
+</section>
+</section>
+<section id="filtering-for-freestyle-with-hr" class="level2">
+<h2 class="anchored" data-anchor-id="filtering-for-freestyle-with-hr">Filtering for Freestyle with HR</h2>
+<div class="cell">
+<details class="code-fold">
+<summary>Block 4: Filter funnel — freestyle with HR</summary>
+<div class="sourceCode cell-code" id="cb7" style="background: #f1f3f5;"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb7-1">n0 <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">nrow</span>(laps_clean)</span>
+<span id="cb7-2">s0 <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">n_distinct</span>(laps_clean<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">$</span>session_id)</span>
+<span id="cb7-3"></span>
+<span id="cb7-4">d <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> laps_clean <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">%&gt;%</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">filter</span>(swim_stroke <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">==</span> <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"freestyle"</span>)</span>
+<span id="cb7-5">n1 <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">nrow</span>(d); s1 <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">n_distinct</span>(d<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">$</span>session_id)</span>
+<span id="cb7-6"></span>
+<span id="cb7-7">d <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> d <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">%&gt;%</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">filter</span>(<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">!</span><span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">is.na</span>(stroke_rate))</span>
+<span id="cb7-8">n2 <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">nrow</span>(d); s2 <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">n_distinct</span>(d<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">$</span>session_id)</span>
+<span id="cb7-9"></span>
+<span id="cb7-10">d <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> d <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">%&gt;%</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">filter</span>(<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">!</span><span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">is.na</span>(avg_hr), avg_hr <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">&lt;</span> <span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">220</span>)</span>
+<span id="cb7-11">n3 <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">nrow</span>(d); s3 <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">n_distinct</span>(d<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">$</span>session_id)</span>
+<span id="cb7-12"></span>
+<span id="cb7-13">d_free_hr <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> d <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">%&gt;%</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">mutate</span>(<span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">session_id =</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">factor</span>(session_id))</span>
+<span id="cb7-14"></span>
+<span id="cb7-15"><span class="co" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;"># Compute freestyle fraction per interval and classify</span></span>
+<span id="cb7-16">rep_composition <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> laps_clean <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">%&gt;%</span></span>
+<span id="cb7-17">  <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">group_by</span>(file, rep_id) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">%&gt;%</span></span>
+<span id="cb7-18">  <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">summarise</span>(</span>
+<span id="cb7-19">    <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">rep_n_total  =</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">n</span>(),</span>
+<span id="cb7-20">    <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">rep_n_free   =</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">sum</span>(swim_stroke <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">==</span> <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"freestyle"</span>),</span>
+<span id="cb7-21">    <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">rep_pct_free =</span> rep_n_free <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">/</span> rep_n_total,</span>
+<span id="cb7-22">    <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">.groups =</span> <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"drop"</span></span>
+<span id="cb7-23">  )</span>
+<span id="cb7-24"></span>
+<span id="cb7-25">d_free_hr <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> d_free_hr <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">%&gt;%</span></span>
+<span id="cb7-26">  <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">left_join</span>(rep_composition, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">by =</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">c</span>(<span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"file"</span>, <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"rep_id"</span>))</span>
+<span id="cb7-27"></span>
+<span id="cb7-28">d_free_hr<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">$</span>set_type <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">cut</span>(</span>
+<span id="cb7-29">  d_free_hr<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">$</span>rep_pct_free,</span>
+<span id="cb7-30">  <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">breaks =</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">c</span>(<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">-</span><span class="fl" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">0.01</span>, <span class="fl" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">0.5</span>, <span class="fl" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">0.99</span>, <span class="fl" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">1.0</span>),</span>
+<span id="cb7-31">  <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">labels =</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">c</span>(<span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"IM_set"</span>, <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"mixed"</span>, <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"pure_free"</span>),</span>
+<span id="cb7-32">  <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">include.lowest =</span> <span class="cn" style="color: #8f5902;
+background-color: null;
+font-style: inherit;">TRUE</span></span>
+<span id="cb7-33">)</span></code></pre></div>
+</details>
+</div>
+<div class="cell">
+<div class="cell-output cell-output-stdout">
+<pre><code>Filter funnel:</code></pre>
+</div>
+<div class="cell-output cell-output-stdout">
+<pre><code>  All strokes:        14933 laps | 203 sessions</code></pre>
+</div>
+<div class="cell-output cell-output-stdout">
+<pre><code>  Freestyle only:     11407 laps | 202 sessions</code></pre>
+</div>
+<div class="cell-output cell-output-stdout">
+<pre><code>  + stroke_rate:      11407 laps | 202 sessions</code></pre>
+</div>
+<div class="cell-output cell-output-stdout">
+<pre><code>  + avg_hr (&lt; 220):   11396 laps | 202 sessions</code></pre>
+</div>
+<div class="cell-output cell-output-stdout">
+<pre><code>  Retention:          76.3 % of all laps</code></pre>
+</div>
+</div>
+</section>
+<section id="stage-1-the-structural-gam" class="level2">
+<h2 class="anchored" data-anchor-id="stage-1-the-structural-gam">Stage 1: The Structural GAM</h2>
+<section id="the-model" class="level3">
+<h3 class="anchored" data-anchor-id="the-model">The Model</h3>
+<p>The goal is to predict speed from workout structure and effort, so that what remains reflects fitness more clearly. The formula:</p>
+<p><img src="https://latex.codecogs.com/png.latex?%0A%5Ctext%7Bspeed%7D%20%5Csim%20%5Ctext%7Bte%7D(%5Ctext%7Bpos%5C_mid%7D,%20%5Clog(%5Ctext%7Brep%5C_length%7D))%20+%20s(%5Ctext%7Bcum%5C_distance%7D)%20+%20s(%5Clog(1%20+%20%5Ctext%7Brest%7D))%20+%20%5Ctext%7Bpool%5C_length%7D%20+%20s(%5Ctext%7Bstroke%5C_rate%7D)%20+%20s(%5Ctext%7Bavg%5C_hr%7D)%20+%20%5Ctext%7Bset%5C_type%7D%0A"></p>
+<p>A few modeling choices are worth explaining:</p>
+<ul>
+<li><strong>Tensor product</strong> <code>te(pos_mid, log_rep_length)</code> rather than separate smooths, because pacing shape genuinely varies with rep distance — the step function of a 50 looks nothing like the gradual ramp of a 300.</li>
+<li><strong><code>scat()</code> family</strong> — a scaled <img src="https://latex.codecogs.com/png.latex?t">-distribution rather than Gaussian. Watch glitches, bad stroke detection, and occasional anomalous sprints or coasts create heavy-tailed residuals. The estimated degrees of freedom (<img src="https://latex.codecogs.com/png.latex?%5Capprox%204">) confirm this; <code>scat()</code> automatically down-weights these without aggressive deletion <span class="citation" data-cites="wood2017">(Wood 2017)</span>.</li>
+<li><strong><code>bam()</code> with <code>discrete = TRUE</code></strong> for computational efficiency on roughly 10K rows <span class="citation" data-cites="wood2011">(Wood 2011)</span>.</li>
+<li><strong>No temporal smooth.</strong> One might consider adding <code>s(date)</code> to capture the fitness trend directly in Stage 1. I deliberately omit it: a temporal smooth here would compete with the density surface in Stage 2, creating identifiability issues — if Stage 1 already absorbs the fitness trend, the density surface has nothing left to track. Practically, I tested including <code>s(date_num)</code> and found it introduced instability in the smooth estimates without improving the adjusted pace quality. The structural GAM stays purely cross-sectional (modeling within-session mechanics), and all temporal evolution is delegated to Stage 2.</li>
+</ul>
+<div class="cell">
+<details class="code-fold">
+<summary>Block 5: Fit structural GAM</summary>
+<div class="sourceCode cell-code" id="cb14" style="background: #f1f3f5;"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb14-1">fit_structural <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">bam</span>(</span>
+<span id="cb14-2">  speed <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">~</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">te</span>(pos_mid, log_rep_length, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">k =</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">c</span>(<span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">5</span>, <span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">4</span>)) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">+</span></span>
+<span id="cb14-3">    <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">s</span>(cum_distance, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">k =</span> <span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">10</span>) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">+</span></span>
+<span id="cb14-4">    <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">s</span>(log1p_rest, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">k =</span> <span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">6</span>) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">+</span></span>
+<span id="cb14-5">    pool_length <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">+</span></span>
+<span id="cb14-6">    <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">s</span>(stroke_rate, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">k =</span> <span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">10</span>) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">+</span></span>
+<span id="cb14-7">    <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">s</span>(avg_hr) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">+</span></span>
+<span id="cb14-8">    set_type,</span>
+<span id="cb14-9">  <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">data   =</span> d_free_hr,</span>
+<span id="cb14-10">  <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">family =</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">scat</span>(),</span>
+<span id="cb14-11">  <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">method =</span> <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"fREML"</span>,</span>
+<span id="cb14-12">  <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">discrete =</span> <span class="cn" style="color: #8f5902;
+background-color: null;
+font-style: inherit;">TRUE</span></span>
+<span id="cb14-13">)</span>
+<span id="cb14-14"></span>
+<span id="cb14-15">sm <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">summary</span>(fit_structural)</span></code></pre></div>
+</details>
+</div>
+<div class="cell">
+<div class="cell-output cell-output-stdout">
+<pre><code>R² = 0.531 </code></pre>
+</div>
+<div class="cell-output cell-output-stdout">
+<pre><code>scat df = 3.99 </code></pre>
+</div>
+</div>
+</section>
+<section id="what-each-term-captures" class="level3">
+<h3 class="anchored" data-anchor-id="what-each-term-captures">What Each Term Captures</h3>
+<div class="cell">
+<details class="code-fold">
+<summary>Partial effect plots</summary>
+<div class="sourceCode cell-code" id="cb17" style="background: #f1f3f5;"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb17-1"><span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">draw</span>(fit_structural, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">residuals =</span> <span class="cn" style="color: #8f5902;
+background-color: null;
+font-style: inherit;">FALSE</span>)</span></code></pre></div>
+</details>
+<div class="cell-output-display">
+<div class="quarto-figure quarto-figure-center">
+<figure class="figure">
+<p><img src="https://jbogomolovas2.github.io/Julius-s-Blog/posts/swim-css-pipeline/index_files/figure-html/block5-draw-1.png" class="img-fluid figure-img" width="1500"></p>
+<figcaption>Partial effects of each smooth term. Stroke rate dominates (~1.7 m/s range), confirming it is the primary effort lever. The pacing surface, cumulative distance, rest state, and heart rate each capture distinct structural effects.</figcaption>
+</figure>
+</div>
+</div>
+</div>
+<p>The partial effects line up pretty well with what you would expect as a swimmer:</p>
+<ul>
+<li><strong>Tensor (pacing × rep distance)</strong> — shorter sets tend to be faster, and speed is higher at the start and end of intervals compared to the middle.</li>
+<li><strong>Cumulative distance</strong> — you can see the slower warmup in the first few hundred meters, followed by a plateau, and more variable speed toward the end of the workout.</li>
+<li><strong>Rest state</strong> — shows a U-shape. At log1p_rest = 0, which mostly corresponds to lengths that continue through the wall without stopping, speed is relatively high because the swimmer carries momentum through the turn. As rest increases from zero (short wall starts), speed drops — the swimmer has stopped but hasn’t recovered yet. With longer rest, speed recovers back toward that turn-continuation baseline.</li>
+<li><strong>Stroke rate</strong> — dominates everything, spanning roughly 1.7 m/s across the full speed range. This confirms stroke rate is the primary effort lever. Note that unusually fast speeds at low stroke rates likely correspond to sets with fins or paddles, which the model cannot distinguish.</li>
+<li><strong>Heart rate</strong> — adds a smaller but real contribution. Everything above roughly 135 bpm is associated with higher speed.</li>
+</ul>
+<div class="cell">
+<details class="code-fold">
+<summary>Model diagnostics</summary>
+<div class="sourceCode cell-code" id="cb18" style="background: #f1f3f5;"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb18-1"><span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">appraise</span>(fit_structural)</span></code></pre></div>
+</details>
+<div class="cell-output-display">
+<div class="quarto-figure quarto-figure-center">
+<figure class="figure">
+<p><img src="https://jbogomolovas2.github.io/Julius-s-Blog/posts/swim-css-pipeline/index_files/figure-html/block5-diagnostics-1.png" class="img-fluid figure-img" width="1500"></p>
+<figcaption>Model diagnostics via gratia::appraise(). The QQ plot confirms the scat() family is appropriate — a Gaussian fit would show heavy tails.</figcaption>
+</figure>
+</div>
+</div>
+</div>
+<div class="cell">
+<details class="code-fold">
+<summary>Basis adequacy checks</summary>
+<div class="sourceCode cell-code" id="cb19" style="background: #f1f3f5;"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb19-1"><span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">k.check</span>(fit_structural)</span></code></pre></div>
+</details>
+<div class="cell-output cell-output-stdout">
+<pre><code>                           k'       edf   k-index p-value
+te(log_rep_length,pos_mid) 19 18.517552 0.9573048   0.000
+s(cum_distance)             9  6.353819 0.9763632   0.045
+s(log1p_rest)               5  4.655131 0.9927923   0.325
+s(stroke_rate)              9  8.856147 0.7298421   0.000
+s(avg_hr)                   9  4.785629 1.0090911   0.740</code></pre>
+</div>
+</div>
+<p>Most terms pass the basis adequacy check comfortably. The stroke rate smooth has a low <img src="https://latex.codecogs.com/png.latex?k">-index, but this is not surprising — the relationship between stroke rate and speed is strong and nearly linear, so the smooth is doing most of its work with very few effective degrees of freedom. The low <img src="https://latex.codecogs.com/png.latex?k">-index reflects the fact that there is real speed variation at any given stroke rate (from unmeasured factors like equipment, kick intensity, etc.) rather than a problem with the model.</p>
+</section>
+</section>
+<section id="computing-adjusted-pace" class="level2">
+<h2 class="anchored" data-anchor-id="computing-adjusted-pace">Computing Adjusted Pace</h2>
+<p>The structural GAM explains about half the variance in raw speed. It doesn’t perfectly remove structural effects — it <em>reduces</em> them substantially, narrowing the pace distribution so the fitness signal becomes more visible. The adjusted pace is computed as:</p>
+<p><img src="https://latex.codecogs.com/png.latex?%0A%5Ctext%7Badj%5C_speed%7D_i%20=%20%5Ctext%7Bspeed%7D_i%20-%20%5Chat%7Bf%7D(%5Cmathbf%7Bx%7D_i)%20+%20%5Chat%7Bf%7D(%5Cmathbf%7Bx%7D_%7B%5Ctext%7Bref%7D%7D)%0A"></p>
+<p>where <img src="https://latex.codecogs.com/png.latex?%5Chat%7Bf%7D"> is the structural model prediction and <img src="https://latex.codecogs.com/png.latex?%5Cmathbf%7Bx%7D_%7B%5Ctext%7Bref%7D%7D"> is a fixed reference condition: mid-rep of a typical repeat, mid-workout, off a flip turn, at median stroke rate and heart rate, in a 25-yard pool, in a pure freestyle set. The reference point gives the adjusted pace an interpretable anchor — it represents the predicted speed under standardized conditions.</p>
+<div class="cell">
+<details class="code-fold">
+<summary>Block 6: Compute adjusted pace</summary>
+<div class="sourceCode cell-code" id="cb21" style="background: #f1f3f5;"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb21-1"><span class="co" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;"># Define working laps for reference SR</span></span>
+<span id="cb21-2">working_laps <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> d_free_hr <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">%&gt;%</span></span>
+<span id="cb21-3">  <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">filter</span>(cum_distance <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">&gt;</span> <span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">400</span>,</span>
+<span id="cb21-4">         cum_distance <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">&lt;</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">quantile</span>(cum_distance, <span class="fl" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">0.9</span>))</span>
+<span id="cb21-5"></span>
+<span id="cb21-6">base_sr <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">median</span>(working_laps<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">$</span>stroke_rate, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">na.rm =</span> <span class="cn" style="color: #8f5902;
+background-color: null;
+font-style: inherit;">TRUE</span>)</span>
+<span id="cb21-7">most_common_pool <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> d_free_hr <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">%&gt;%</span></span>
+<span id="cb21-8">  <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">count</span>(pool_length, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">sort =</span> <span class="cn" style="color: #8f5902;
+background-color: null;
+font-style: inherit;">TRUE</span>) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">%&gt;%</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">slice</span>(<span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">1</span>) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">%&gt;%</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">pull</span>(pool_length)</span>
+<span id="cb21-9"></span>
+<span id="cb21-10">structural_pred <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">predict</span>(fit_structural, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">type =</span> <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"response"</span>)</span>
+<span id="cb21-11"></span>
+<span id="cb21-12">ref <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">data.frame</span>(</span>
+<span id="cb21-13">  <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">pos_mid        =</span> <span class="fl" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">0.5</span>,</span>
+<span id="cb21-14">  <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">log_rep_length =</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">median</span>(d_free_hr<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">$</span>log_rep_length),</span>
+<span id="cb21-15">  <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">cum_distance   =</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">median</span>(d_free_hr<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">$</span>cum_distance),</span>
+<span id="cb21-16">  <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">log1p_rest     =</span> <span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">0</span>,</span>
+<span id="cb21-17">  <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">pool_length    =</span> most_common_pool,</span>
+<span id="cb21-18">  <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">stroke_rate    =</span> base_sr,</span>
+<span id="cb21-19">  <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">avg_hr         =</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">median</span>(d_free_hr<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">$</span>avg_hr),</span>
+<span id="cb21-20">  <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">set_type       =</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">factor</span>(<span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"pure_free"</span>, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">levels =</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">levels</span>(d_free_hr<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">$</span>set_type))</span>
+<span id="cb21-21">)</span>
+<span id="cb21-22"></span>
+<span id="cb21-23">ref_baseline <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">as.numeric</span>(<span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">predict</span>(fit_structural, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">newdata =</span> ref, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">type =</span> <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"response"</span>))</span>
+<span id="cb21-24"></span>
+<span id="cb21-25">d_free_hr<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">$</span>adj_speed <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> d_free_hr<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">$</span>speed <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">-</span> structural_pred <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">+</span> ref_baseline</span>
+<span id="cb21-26">d_free_hr<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">$</span>adj_pace  <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> <span class="fl" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">91.44</span> <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">/</span> d_free_hr<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">$</span>adj_speed</span></code></pre></div>
+</details>
+</div>
+<div class="cell">
+<div class="cell-output cell-output-stdout">
+<pre><code>Reference baseline: 1.073 m/s = 1:25.2 /100y</code></pre>
+</div>
+<div class="cell-output cell-output-stdout">
+<pre><code>  base SR: 0.483 str/s | pool: 22.86 m | median HR: 148 bpm</code></pre>
+</div>
+</div>
+<section id="the-adjustment-tightens-the-distribution" class="level3">
+<h3 class="anchored" data-anchor-id="the-adjustment-tightens-the-distribution">The Adjustment Tightens the Distribution</h3>
+<p>The whole point of Stage 1 is to reduce noise so that the fitness signal becomes visible. Here’s the effect — raw pace versus adjusted pace:</p>
+<div class="cell">
+<details class="code-fold">
+<summary>Variance reduction visualization</summary>
+<div class="sourceCode cell-code" id="cb24" style="background: #f1f3f5;"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb24-1">d_free_hr<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">$</span>raw_pace <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> <span class="fl" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">91.44</span> <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">/</span> d_free_hr<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">$</span>speed</span>
+<span id="cb24-2"></span>
+<span id="cb24-3">density_df <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">bind_rows</span>(</span>
+<span id="cb24-4">  d_free_hr <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">%&gt;%</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">transmute</span>(<span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">pace =</span> raw_pace, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">type =</span> <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"Raw pace"</span>),</span>
+<span id="cb24-5">  d_free_hr <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">%&gt;%</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">transmute</span>(<span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">pace =</span> adj_pace, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">type =</span> <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"Adjusted pace"</span>)</span>
+<span id="cb24-6">) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">%&gt;%</span></span>
+<span id="cb24-7">  <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">mutate</span>(<span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">type =</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">factor</span>(type, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">levels =</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">c</span>(<span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"Raw pace"</span>, <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"Adjusted pace"</span>)))</span>
+<span id="cb24-8"></span>
+<span id="cb24-9">raw_sd <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">round</span>(<span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">sd</span>(d_free_hr<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">$</span>raw_pace, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">na.rm =</span> <span class="cn" style="color: #8f5902;
+background-color: null;
+font-style: inherit;">TRUE</span>), <span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">1</span>)</span>
+<span id="cb24-10">adj_sd <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">round</span>(<span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">sd</span>(d_free_hr<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">$</span>adj_pace, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">na.rm =</span> <span class="cn" style="color: #8f5902;
+background-color: null;
+font-style: inherit;">TRUE</span>), <span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">1</span>)</span>
+<span id="cb24-11"></span>
+<span id="cb24-12"><span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">ggplot</span>(density_df, <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">aes</span>(<span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">x =</span> pace, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">fill =</span> type, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">color =</span> type)) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">+</span></span>
+<span id="cb24-13">  <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">geom_density</span>(<span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">alpha =</span> <span class="fl" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">0.35</span>, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">linewidth =</span> <span class="fl" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">0.8</span>) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">+</span></span>
+<span id="cb24-14">  <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">scale_x_continuous</span>(</span>
+<span id="cb24-15">    <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">name =</span> <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"Pace per 100y (sec)"</span>,</span>
+<span id="cb24-16">    <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">limits =</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">c</span>(<span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">60</span>, <span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">120</span>),</span>
+<span id="cb24-17">    <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">breaks =</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">seq</span>(<span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">60</span>, <span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">120</span>, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">by =</span> <span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">5</span>),</span>
+<span id="cb24-18">    <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">labels =</span> <span class="cf" style="color: #003B4F;
+background-color: null;
+font-weight: bold;
+font-style: inherit;">function</span>(x) <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">sprintf</span>(<span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"%d:%02d"</span>, x <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">%/%</span> <span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">60</span>, x <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">%%</span> <span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">60</span>)</span>
+<span id="cb24-19">  ) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">+</span></span>
+<span id="cb24-20">  <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">scale_fill_manual</span>(<span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">values =</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">c</span>(<span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"grey60"</span>, <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"steelblue"</span>)) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">+</span></span>
+<span id="cb24-21">  <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">scale_color_manual</span>(<span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">values =</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">c</span>(<span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"grey40"</span>, <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"steelblue4"</span>)) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">+</span></span>
+<span id="cb24-22">  <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">annotate</span>(<span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"text"</span>, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">x =</span> <span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">65</span>, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">y =</span> <span class="cn" style="color: #8f5902;
+background-color: null;
+font-style: inherit;">Inf</span>, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">vjust =</span> <span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">2</span>, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">hjust =</span> <span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">0</span>,</span>
+<span id="cb24-23">           <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">label =</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">paste0</span>(<span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"Raw SD = "</span>, raw_sd, <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">" sec</span><span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">\n</span><span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">Adj SD = "</span>, adj_sd, <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">" sec"</span>),</span>
+<span id="cb24-24">           <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">size =</span> <span class="fl" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">3.5</span>) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">+</span></span>
+<span id="cb24-25">  <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">labs</span>(<span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">title =</span> <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"Structural adjustment narrows the pace distribution"</span>,</span>
+<span id="cb24-26">       <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">subtitle =</span> <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"Reducing effort, pacing, fatigue, and rest effects"</span>,</span>
+<span id="cb24-27">       <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">y =</span> <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"Density"</span>, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">fill =</span> <span class="cn" style="color: #8f5902;
+background-color: null;
+font-style: inherit;">NULL</span>, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">color =</span> <span class="cn" style="color: #8f5902;
+background-color: null;
+font-style: inherit;">NULL</span>) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">+</span></span>
+<span id="cb24-28">  <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">theme</span>(<span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">legend.position =</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">c</span>(<span class="fl" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">0.85</span>, <span class="fl" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">0.85</span>))</span></code></pre></div>
+</details>
+<div class="cell-output-display">
+<div class="quarto-figure quarto-figure-center">
+<figure class="figure">
+<p><img src="https://jbogomolovas2.github.io/Julius-s-Blog/posts/swim-css-pipeline/index_files/figure-html/block6-variance-reduction-1.png" class="img-fluid figure-img" width="1200"></p>
+<figcaption>The structural adjustment narrows the pace distribution substantially, reducing workout design noise that would otherwise mask the fitness signal.</figcaption>
+</figure>
+</div>
+</div>
+</div>
+</section>
+</section>
+<section id="stage-2-the-density-surface" class="level2">
+<h2 class="anchored" data-anchor-id="stage-2-the-density-surface">Stage 2: The Density Surface</h2>
+<p>With adjusted paces in hand, the question becomes: how does the <em>distribution</em> of adjusted pace evolve over time? Rather than tracking a single session mean, I model the full pace distribution as a smooth surface over (date × pace).</p>
+<section id="binning-into-a-2d-histogram" class="level3">
+<h3 class="anchored" data-anchor-id="binning-into-a-2d-histogram">Binning into a 2D Histogram</h3>
+<p>Each session’s adjusted paces are binned into 1-second pace bins, normalized to proportions. The resulting grid is completed with zeros so every session × pace combination has a value.</p>
+<div class="cell">
+<details class="code-fold">
+<summary>Block 7: Build 2D histogram</summary>
+<div class="sourceCode cell-code" id="cb25" style="background: #f1f3f5;"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb25-1">d_plot <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> d_free_hr <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">%&gt;%</span></span>
+<span id="cb25-2">  <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">mutate</span>(<span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">date_num =</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">as.numeric</span>(session_date <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">-</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">min</span>(session_date)))</span>
+<span id="cb25-3"></span>
+<span id="cb25-4">pace_grid <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">seq</span>(<span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">floor</span>(<span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">min</span>(d_plot<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">$</span>adj_pace, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">na.rm =</span> <span class="cn" style="color: #8f5902;
+background-color: null;
+font-style: inherit;">TRUE</span>)),</span>
+<span id="cb25-5">                 <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">ceiling</span>(<span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">max</span>(d_plot<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">$</span>adj_pace, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">na.rm =</span> <span class="cn" style="color: #8f5902;
+background-color: null;
+font-style: inherit;">TRUE</span>)), <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">by =</span> <span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">1</span>)</span>
+<span id="cb25-6"></span>
+<span id="cb25-7">d_plot<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">$</span>pace_bin <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">cut</span>(d_plot<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">$</span>adj_pace, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">breaks =</span> pace_grid,</span>
+<span id="cb25-8">                       <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">include.lowest =</span> <span class="cn" style="color: #8f5902;
+background-color: null;
+font-style: inherit;">TRUE</span>, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">labels =</span> <span class="cn" style="color: #8f5902;
+background-color: null;
+font-style: inherit;">FALSE</span>)</span>
+<span id="cb25-9">d_plot<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">$</span>pace_mid <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> pace_grid[d_plot<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">$</span>pace_bin] <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">+</span> <span class="fl" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">0.5</span></span>
+<span id="cb25-10"></span>
+<span id="cb25-11">hist2d <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> d_plot <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">%&gt;%</span></span>
+<span id="cb25-12">  <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">filter</span>(<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">!</span><span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">is.na</span>(pace_bin)) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">%&gt;%</span></span>
+<span id="cb25-13">  <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">group_by</span>(session_id, session_date, date_num, pace_mid) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">%&gt;%</span></span>
+<span id="cb25-14">  <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">summarise</span>(<span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">count =</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">n</span>(), <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">.groups =</span> <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"drop"</span>) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">%&gt;%</span></span>
+<span id="cb25-15">  <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">group_by</span>(session_id) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">%&gt;%</span></span>
+<span id="cb25-16">  <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">mutate</span>(<span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">prop =</span> count <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">/</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">sum</span>(count)) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">%&gt;%</span></span>
+<span id="cb25-17">  <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">ungroup</span>()</span>
+<span id="cb25-18"></span>
+<span id="cb25-19">all_sessions <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> d_plot <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">%&gt;%</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">distinct</span>(session_id, session_date, date_num)</span>
+<span id="cb25-20">all_pace <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">data.frame</span>(<span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">pace_mid =</span> pace_grid[<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">-</span><span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">length</span>(pace_grid)] <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">+</span> <span class="fl" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">0.5</span>)</span>
+<span id="cb25-21"></span>
+<span id="cb25-22">full_grid <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">crossing</span>(all_sessions, all_pace) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">%&gt;%</span></span>
+<span id="cb25-23">  <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">left_join</span>(hist2d <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">%&gt;%</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">select</span>(session_id, pace_mid, prop),</span>
+<span id="cb25-24">            <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">by =</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">c</span>(<span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"session_id"</span>, <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"pace_mid"</span>)) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">%&gt;%</span></span>
+<span id="cb25-25">  <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">mutate</span>(<span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">prop =</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">replace_na</span>(prop, <span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">0</span>))</span>
+<span id="cb25-26"></span>
+<span id="cb25-27"><span class="co" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;"># Trim extremes</span></span>
+<span id="cb25-28">pace_range <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">quantile</span>(d_plot<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">$</span>adj_pace, <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">c</span>(<span class="fl" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">0.005</span>, <span class="fl" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">0.995</span>), <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">na.rm =</span> <span class="cn" style="color: #8f5902;
+background-color: null;
+font-style: inherit;">TRUE</span>)</span>
+<span id="cb25-29">full_grid <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> full_grid <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">%&gt;%</span></span>
+<span id="cb25-30">  <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">filter</span>(pace_mid <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">&gt;=</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">floor</span>(pace_range[<span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">1</span>]),</span>
+<span id="cb25-31">         pace_mid <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">&lt;=</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">ceiling</span>(pace_range[<span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">2</span>]))</span></code></pre></div>
+</details>
+</div>
+<div class="cell">
+<div class="cell-output cell-output-stdout">
+<pre><code>Histogram grid: 8282 cells | 202 sessions | 41 pace bins</code></pre>
+</div>
+</div>
+</section>
+<section id="fitting-the-density-surface" class="level3">
+<h3 class="anchored" data-anchor-id="fitting-the-density-surface">Fitting the Density Surface</h3>
+<p>A tensor product GAM smooths the noisy session-level histograms into a continuous density surface. The model uses a quasibinomial family (logit link respects <img src="https://latex.codecogs.com/png.latex?%5B0,%201%5D"> bounds) and lets the penalty — not the basis dimension — control complexity <span class="citation" data-cites="wood2017">(Wood 2017)</span>.</p>
+<div class="cell">
+<details class="code-fold">
+<summary>Block 8: Fit density surface GAM</summary>
+<div class="sourceCode cell-code" id="cb27" style="background: #f1f3f5;"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb27-1">fit_density <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">bam</span>(</span>
+<span id="cb27-2">  prop <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">~</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">te</span>(date_num, pace_mid, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">k =</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">c</span>(<span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">15</span>, <span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">15</span>), <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">bs =</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">c</span>(<span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"cr"</span>, <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"cr"</span>)),</span>
+<span id="cb27-3">  <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">data    =</span> full_grid,</span>
+<span id="cb27-4">  <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">family  =</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">quasibinomial</span>(),</span>
+<span id="cb27-5">  <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">method  =</span> <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"fREML"</span>,</span>
+<span id="cb27-6">  <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">discrete =</span> <span class="cn" style="color: #8f5902;
+background-color: null;
+font-style: inherit;">TRUE</span></span>
+<span id="cb27-7">)</span></code></pre></div>
+</details>
+</div>
+<div class="cell">
+<div class="cell-output cell-output-stdout">
+<pre><code>Density surface R² = 0.493 </code></pre>
+</div>
+<div class="cell-output cell-output-stdout">
+<pre><code>Effective degrees of freedom: 77 </code></pre>
+</div>
+</div>
+<p>The surface has a temporal resolution of approximately 6 weeks — each density estimate borrows information from sessions within roughly ±3 weeks. In this retrospective analysis the tensor product smooths bidirectionally, borrowing from both past and future sessions. In a rolling real-time use case, the same idea could be applied with a trailing window so the estimate only borrows from the past.</p>
+<div class="cell">
+<details class="code-fold">
+<summary>Predict on fine grid</summary>
+<div class="sourceCode cell-code" id="cb30" style="background: #f1f3f5;"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb30-1">pred_grid <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">crossing</span>(</span>
+<span id="cb30-2">  <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">date_num =</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">seq</span>(<span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">min</span>(full_grid<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">$</span>date_num), <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">max</span>(full_grid<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">$</span>date_num),</span>
+<span id="cb30-3">                 <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">length.out =</span> <span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">200</span>),</span>
+<span id="cb30-4">  <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">pace_mid =</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">seq</span>(<span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">min</span>(full_grid<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">$</span>pace_mid), <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">max</span>(full_grid<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">$</span>pace_mid), <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">by =</span> <span class="fl" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">0.5</span>)</span>
+<span id="cb30-5">)</span>
+<span id="cb30-6">pred_grid<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">$</span>pred <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">predict</span>(fit_density, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">newdata =</span> pred_grid, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">type =</span> <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"response"</span>)</span>
+<span id="cb30-7">pred_grid<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">$</span>date <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">min</span>(d_plot<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">$</span>session_date) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">+</span> pred_grid<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">$</span>date_num</span></code></pre></div>
+</details>
+</div>
+</section>
+</section>
+<section id="base-pace-extraction" class="level2">
+<h2 class="anchored" data-anchor-id="base-pace-extraction">Base Pace Extraction</h2>
+<p>The fitness metric is the <strong>mode</strong> of the adjusted pace distribution at each time point — the pace where the density surface peaks. This is the “base” in the sense swimmers use the word: the pace you naturally settle into across a typical training session, after accounting for effort and workout structure.</p>
+<p>Raw grid evaluation produces step-function artifacts, so I refine the peak location with parabolic interpolation through 5 grid points centered on the argmax:</p>
+<div class="cell">
+<details class="code-fold">
+<summary>Block 9: Extract base pace via parabolic interpolation</summary>
+<div class="sourceCode cell-code" id="cb31" style="background: #f1f3f5;"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb31-1">refine_peak <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> <span class="cf" style="color: #003B4F;
+background-color: null;
+font-weight: bold;
+font-style: inherit;">function</span>(x, y) {</span>
+<span id="cb31-2">  idx <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">which.max</span>(y)</span>
+<span id="cb31-3">  <span class="cf" style="color: #003B4F;
+background-color: null;
+font-weight: bold;
+font-style: inherit;">if</span> (idx <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">&lt;=</span> <span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">2</span> <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">||</span> idx <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">&gt;=</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">length</span>(y) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">-</span> <span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">1</span>) {</span>
+<span id="cb31-4">    <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">return</span>(<span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">data.frame</span>(<span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">peak_pace =</span> x[idx], <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">peak_density =</span> y[idx]))</span>
+<span id="cb31-5">  }</span>
+<span id="cb31-6">  win <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">max</span>(<span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">1</span>, idx <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">-</span> <span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">2</span>)<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">:</span><span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">min</span>(<span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">length</span>(y), idx <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">+</span> <span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">2</span>)</span>
+<span id="cb31-7">  xw <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> x[win]; yw <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> y[win]</span>
+<span id="cb31-8">  qfit <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">lm</span>(yw <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">~</span> xw <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">+</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">I</span>(xw<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">^</span><span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">2</span>))</span>
+<span id="cb31-9">  co <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">coef</span>(qfit)</span>
+<span id="cb31-10">  peak_x <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">-</span>co[<span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">2</span>] <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">/</span> (<span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">2</span> <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">*</span> co[<span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">3</span>])</span>
+<span id="cb31-11">  peak_y <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> co[<span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">1</span>] <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">+</span> co[<span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">2</span>] <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">*</span> peak_x <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">+</span> co[<span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">3</span>] <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">*</span> peak_x<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">^</span><span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">2</span></span>
+<span id="cb31-12">  <span class="cf" style="color: #003B4F;
+background-color: null;
+font-weight: bold;
+font-style: inherit;">if</span> (peak_x <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">&lt;</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">min</span>(xw) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">||</span> peak_x <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">&gt;</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">max</span>(xw)) {</span>
+<span id="cb31-13">    <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">return</span>(<span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">data.frame</span>(<span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">peak_pace =</span> x[idx], <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">peak_density =</span> y[idx]))</span>
+<span id="cb31-14">  }</span>
+<span id="cb31-15">  <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">data.frame</span>(<span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">peak_pace =</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">as.numeric</span>(peak_x),</span>
+<span id="cb31-16">             <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">peak_density =</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">as.numeric</span>(peak_y))</span>
+<span id="cb31-17">}</span>
+<span id="cb31-18"></span>
+<span id="cb31-19">gam_peak <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> pred_grid <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">%&gt;%</span></span>
+<span id="cb31-20">  <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">group_by</span>(date_num, date) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">%&gt;%</span></span>
+<span id="cb31-21">  <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">arrange</span>(pace_mid) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">%&gt;%</span></span>
+<span id="cb31-22">  <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">group_modify</span>(<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">~</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">refine_peak</span>(.x<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">$</span>pace_mid, .x<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">$</span>pred)) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">%&gt;%</span></span>
+<span id="cb31-23">  <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">ungroup</span>()</span></code></pre></div>
+</details>
+</div>
+</section>
+<section id="results" class="level2">
+<h2 class="anchored" data-anchor-id="results">Results</h2>
+<section id="the-density-surface" class="level3">
+<h3 class="anchored" data-anchor-id="the-density-surface">The Density Surface</h3>
+<div class="cell">
+<details class="code-fold">
+<summary>Density surface heatmap with base pace overlay</summary>
+<div class="sourceCode cell-code" id="cb32" style="background: #f1f3f5;"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb32-1"><span class="co" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;"># Formatting helpers</span></span>
+<span id="cb32-2">format_pace <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> <span class="cf" style="color: #003B4F;
+background-color: null;
+font-weight: bold;
+font-style: inherit;">function</span>(secs) {</span>
+<span id="cb32-3">  <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">paste0</span>(<span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">floor</span>(secs <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">/</span> <span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">60</span>), <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">":"</span>, <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">sprintf</span>(<span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"%04.1f"</span>, secs <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">%%</span> <span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">60</span>))</span>
+<span id="cb32-4">}</span>
+<span id="cb32-5"></span>
+<span id="cb32-6">race_date   <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">as.Date</span>(<span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"2025-09-27"</span>)</span>
+<span id="cb32-7">buddy_start <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">as.Date</span>(<span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"2025-04-14"</span>)</span>
+<span id="cb32-8">buddy_end   <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">as.Date</span>(<span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"2025-05-31"</span>)</span>
+<span id="cb32-9"></span>
+<span id="cb32-10">pace_ticks  <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">seq</span>(<span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">70</span>, <span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">105</span>, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">by =</span> <span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">5</span>)</span>
+<span id="cb32-11">pace_labels <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">sprintf</span>(<span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"%d:%02d"</span>, pace_ticks <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">%/%</span> <span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">60</span>, pace_ticks <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">%%</span> <span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">60</span>)</span>
+<span id="cb32-12"></span>
+<span id="cb32-13"><span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">ggplot</span>(pred_grid, <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">aes</span>(<span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">x =</span> date, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">y =</span> pace_mid, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">fill =</span> pred)) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">+</span></span>
+<span id="cb32-14">  <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">geom_raster</span>(<span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">interpolate =</span> <span class="cn" style="color: #8f5902;
+background-color: null;
+font-style: inherit;">TRUE</span>) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">+</span></span>
+<span id="cb32-15">  <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">scale_fill_viridis_c</span>(<span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">option =</span> <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"inferno"</span>, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">direction =</span> <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">-</span><span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">1</span>, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">name =</span> <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"Density"</span>) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">+</span></span>
+<span id="cb32-16">  <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">scale_y_reverse</span>(<span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">name =</span> <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"Adjusted pace / 100y"</span>,</span>
+<span id="cb32-17">                  <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">breaks =</span> pace_ticks, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">labels =</span> pace_labels) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">+</span></span>
+<span id="cb32-18">  <span class="co" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;"># Swim buddy period</span></span>
+<span id="cb32-19">  <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">annotate</span>(<span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"rect"</span>,</span>
+<span id="cb32-20">           <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">xmin =</span> buddy_start, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">xmax =</span> buddy_end,</span>
+<span id="cb32-21">           <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">ymin =</span> <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">-</span><span class="cn" style="color: #8f5902;
+background-color: null;
+font-style: inherit;">Inf</span>, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">ymax =</span> <span class="cn" style="color: #8f5902;
+background-color: null;
+font-style: inherit;">Inf</span>,</span>
+<span id="cb32-22">           <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">fill =</span> <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"black"</span>, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">alpha =</span> <span class="fl" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">0.15</span>) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">+</span></span>
+<span id="cb32-23">  <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">annotate</span>(<span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"text"</span>, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">x =</span> buddy_start <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">+</span> (buddy_end <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">-</span> buddy_start) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">/</span> <span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">2</span>,</span>
+<span id="cb32-24">           <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">y =</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">min</span>(pace_ticks) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">+</span> <span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">1</span>,</span>
+<span id="cb32-25">           <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">label =</span> <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"Swim buddy"</span>, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">color =</span> <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"black"</span>, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">size =</span> <span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">3</span>, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">fontface =</span> <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"italic"</span>) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">+</span></span>
+<span id="cb32-26">  <span class="co" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;"># Race</span></span>
+<span id="cb32-27">  <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">geom_vline</span>(<span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">xintercept =</span> race_date, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">linetype =</span> <span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">2</span>, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">color =</span> <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"black"</span>, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">linewidth =</span> <span class="fl" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">0.7</span>) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">+</span></span>
+<span id="cb32-28">  <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">annotate</span>(<span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"text"</span>, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">x =</span> race_date, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">y =</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">min</span>(pace_ticks),</span>
+<span id="cb32-29">           <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">label =</span> <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"La Jolla relay"</span>, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">color =</span> <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"black"</span>, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">hjust =</span> <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">-</span><span class="fl" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">0.1</span>, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">size =</span> <span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">3</span>) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">+</span></span>
+<span id="cb32-30">  <span class="co" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;"># Base pace trace</span></span>
+<span id="cb32-31">  <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">geom_line</span>(<span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">data =</span> gam_peak, <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">aes</span>(<span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">x =</span> date, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">y =</span> peak_pace, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">fill =</span> <span class="cn" style="color: #8f5902;
+background-color: null;
+font-style: inherit;">NULL</span>),</span>
+<span id="cb32-32">            <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">color =</span> <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"cyan"</span>, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">linewidth =</span> <span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">1</span>) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">+</span></span>
+<span id="cb32-33">  <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">labs</span>(<span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">title =</span> <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"Adjusted pace density surface"</span>,</span>
+<span id="cb32-34">       <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">subtitle =</span> <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"Cyan line = density peak (base pace) | Parabolic interpolation"</span>,</span>
+<span id="cb32-35">       <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">x =</span> <span class="cn" style="color: #8f5902;
+background-color: null;
+font-style: inherit;">NULL</span>) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">+</span></span>
+<span id="cb32-36">  <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">theme</span>(<span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">legend.position =</span> <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"right"</span>)</span></code></pre></div>
+</details>
+<div class="cell-output-display">
+<div class="quarto-figure quarto-figure-center">
+<figure class="figure">
+<p><img src="https://jbogomolovas2.github.io/Julius-s-Blog/posts/swim-css-pipeline/index_files/figure-html/block10-surface-1.png" class="img-fluid figure-img" width="1500"></p>
+<figcaption>Smoothed pace density surface over 19 months. Darker regions indicate more laps at that pace. The cyan line traces the density peak (base pace). The vertical dashed line marks the La Jolla Rough Water Swim relay; the shaded region marks a period of training with a swim buddy.</figcaption>
+</figure>
+</div>
+</div>
+</div>
+</section>
+<section id="the-base-pace-trend" class="level3">
+<h3 class="anchored" data-anchor-id="the-base-pace-trend">The Base Pace Trend</h3>
+<div class="cell">
+<details class="code-fold">
+<summary>Base pace time series</summary>
+<div class="sourceCode cell-code" id="cb33" style="background: #f1f3f5;"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb33-1"><span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">ggplot</span>(gam_peak, <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">aes</span>(<span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">x =</span> date, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">y =</span> peak_pace)) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">+</span></span>
+<span id="cb33-2">  <span class="co" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;"># Swim buddy shading</span></span>
+<span id="cb33-3">  <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">annotate</span>(<span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"rect"</span>,</span>
+<span id="cb33-4">           <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">xmin =</span> buddy_start, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">xmax =</span> buddy_end,</span>
+<span id="cb33-5">           <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">ymin =</span> <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">-</span><span class="cn" style="color: #8f5902;
+background-color: null;
+font-style: inherit;">Inf</span>, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">ymax =</span> <span class="cn" style="color: #8f5902;
+background-color: null;
+font-style: inherit;">Inf</span>,</span>
+<span id="cb33-6">           <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">fill =</span> <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"black"</span>, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">alpha =</span> <span class="fl" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">0.1</span>) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">+</span></span>
+<span id="cb33-7">  <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">annotate</span>(<span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"text"</span>, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">x =</span> buddy_start <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">+</span> (buddy_end <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">-</span> buddy_start) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">/</span> <span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">2</span>,</span>
+<span id="cb33-8">           <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">y =</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">min</span>(gam_peak<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">$</span>peak_pace) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">-</span> <span class="fl" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">0.3</span>,</span>
+<span id="cb33-9">           <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">label =</span> <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"Swim buddy"</span>, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">color =</span> <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"grey30"</span>, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">size =</span> <span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">3</span>, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">fontface =</span> <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"italic"</span>) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">+</span></span>
+<span id="cb33-10">  <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">geom_line</span>(<span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">color =</span> <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"red"</span>, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">linewidth =</span> <span class="fl" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">0.9</span>) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">+</span></span>
+<span id="cb33-11">  <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">scale_y_reverse</span>(<span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">name =</span> <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"Base pace / 100y"</span>,</span>
+<span id="cb33-12">                  <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">breaks =</span> pace_ticks, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">labels =</span> pace_labels) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">+</span></span>
+<span id="cb33-13">  <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">scale_x_date</span>(<span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">date_breaks =</span> <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"3 months"</span>, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">date_labels =</span> <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"%b '%y"</span>) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">+</span></span>
+<span id="cb33-14">  <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">geom_vline</span>(<span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">xintercept =</span> race_date, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">linetype =</span> <span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">2</span>, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">color =</span> <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"grey40"</span>) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">+</span></span>
+<span id="cb33-15">  <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">annotate</span>(<span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"text"</span>, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">x =</span> race_date, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">y =</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">min</span>(gam_peak<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">$</span>peak_pace) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">-</span> <span class="fl" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">0.3</span>,</span>
+<span id="cb33-16">           <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">label =</span> <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"La Jolla relay"</span>, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">color =</span> <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"grey40"</span>, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">hjust =</span> <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">-</span><span class="fl" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">0.1</span>, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">size =</span> <span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">3</span>) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">+</span></span>
+<span id="cb33-17">  <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">labs</span>(<span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">title =</span> <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"Estimated base pace over time"</span>,</span>
+<span id="cb33-18">       <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">subtitle =</span> <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"Mode of adjusted pace distribution | Faster = up"</span>,</span>
+<span id="cb33-19">       <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">x =</span> <span class="cn" style="color: #8f5902;
+background-color: null;
+font-style: inherit;">NULL</span>)</span></code></pre></div>
+</details>
+<div class="cell-output-display">
+<div class="quarto-figure quarto-figure-center">
+<figure class="figure">
+<p><img src="https://jbogomolovas2.github.io/Julius-s-Blog/posts/swim-css-pipeline/index_files/figure-html/block10-peak-1.png" class="img-fluid figure-img" width="1500"></p>
+<figcaption>Estimated base pace over time. Y-axis is reversed so faster is up. The metric captures mesocycle oscillations and shows the expected peak leading into the September 2025 race.</figcaption>
+</figure>
+</div>
+</div>
+</div>
+<div class="cell">
+<div class="cell-output cell-output-stdout">
+<pre><code>Base pace range: 1:23.5 to 1:26.4 | span: 3 sec</code></pre>
+</div>
+<div class="cell-output cell-output-stdout">
+<pre><code>Current (latest): 1:25.0 /100y</code></pre>
+</div>
+</div>
+<p>A few things stand out immediately. First, the base estimate is not flat: it moves on the scale of weeks to months in a way that looks like actual training rather than random session noise. Second, it trends faster heading into the September 2025 relay, which is exactly what I would hope to see if the metric is capturing real fitness. Third, the swim-buddy block lines up with a visibly faster patch as well. That is reassuring, because those are two periods where I independently expected to be swimming better.</p>
+</section>
+<section id="raw-data-vs-smoothed-surface" class="level3">
+<h3 class="anchored" data-anchor-id="raw-data-vs-smoothed-surface">Raw Data vs Smoothed Surface</h3>
+<div class="cell">
+<details class="code-fold">
+<summary>Raw 2D histogram for comparison</summary>
+<div class="sourceCode cell-code" id="cb36" style="background: #f1f3f5;"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb36-1">x_breaks <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">as.numeric</span>(</span>
+<span id="cb36-2">  <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">as.Date</span>(<span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">c</span>(<span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"2024-10-01"</span>,<span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"2025-01-01"</span>,<span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"2025-04-01"</span>,</span>
+<span id="cb36-3">            <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"2025-07-01"</span>,<span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"2025-10-01"</span>,<span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"2026-01-01"</span>)) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">-</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">min</span>(d_plot<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">$</span>session_date)</span>
+<span id="cb36-4">)</span>
+<span id="cb36-5">x_labels <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">c</span>(<span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"Oct '24"</span>,<span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"Jan '25"</span>,<span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"Apr '25"</span>,<span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"Jul '25"</span>,<span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"Oct '25"</span>,<span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"Jan '26"</span>)</span>
+<span id="cb36-6"></span>
+<span id="cb36-7"><span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">ggplot</span>(d_plot, <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">aes</span>(<span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">x =</span> date_num, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">y =</span> adj_pace)) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">+</span></span>
+<span id="cb36-8">  <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">geom_bin2d</span>(<span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">binwidth =</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">c</span>(<span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">14</span>, <span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">1</span>)) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">+</span></span>
+<span id="cb36-9">  <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">scale_fill_viridis_c</span>(<span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">option =</span> <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"inferno"</span>, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">direction =</span> <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">-</span><span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">1</span>, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">name =</span> <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"Laps"</span>) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">+</span></span>
+<span id="cb36-10">  <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">scale_y_reverse</span>(<span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">name =</span> <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"Adjusted pace / 100y"</span>,</span>
+<span id="cb36-11">                  <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">breaks =</span> pace_ticks, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">labels =</span> pace_labels,</span>
+<span id="cb36-12">                  <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">limits =</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">c</span>(<span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">quantile</span>(d_plot<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">$</span>adj_pace, <span class="fl" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">0.995</span>, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">na.rm =</span> <span class="cn" style="color: #8f5902;
+background-color: null;
+font-style: inherit;">TRUE</span>),</span>
+<span id="cb36-13">                             <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">quantile</span>(d_plot<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">$</span>adj_pace, <span class="fl" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">0.005</span>, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">na.rm =</span> <span class="cn" style="color: #8f5902;
+background-color: null;
+font-style: inherit;">TRUE</span>))) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">+</span></span>
+<span id="cb36-14">  <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">scale_x_continuous</span>(<span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">breaks =</span> x_breaks, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">labels =</span> x_labels) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">+</span></span>
+<span id="cb36-15">  <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">labs</span>(<span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">title =</span> <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"Raw 2D histogram — 2-week × 1-sec bins"</span>,</span>
+<span id="cb36-16">       <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">subtitle =</span> <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"Before GAM smoothing"</span>, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">x =</span> <span class="cn" style="color: #8f5902;
+background-color: null;
+font-style: inherit;">NULL</span>)</span></code></pre></div>
+</details>
+<div class="cell-output-display">
+<div class="quarto-figure quarto-figure-center">
+<figure class="figure">
+<p><img src="https://jbogomolovas2.github.io/Julius-s-Blog/posts/swim-css-pipeline/index_files/figure-html/block10-raw-1.png" class="img-fluid figure-img" width="1500"></p>
+<figcaption>Raw 2D histogram before GAM smoothing. The density surface captures the dominant structure while suppressing session-to-session noise.</figcaption>
+</figure>
+</div>
+</div>
+</div>
+</section>
+</section>
+<section id="limitations-and-future-directions" class="level2">
+<h2 class="anchored" data-anchor-id="limitations-and-future-directions">Limitations and Future Directions</h2>
+<p><strong>Equipment confound.</strong> Pull sets with paddles and buoy are systematically faster but equipment use is not recorded in FIT files. You can see this in the stroke rate partial effect — the cluster of fast speeds at low stroke rates likely corresponds to equipment-assisted sets. The model cannot distinguish these from genuinely efficient swimming, so they contribute noise to the adjusted paces.</p>
+<p><strong>Retrospective smoothing.</strong> In the analysis above, the density surface borrows from both earlier and later sessions, so the plotted curve is best understood as a retrospective fitness trace. But that does not mean the framework is limited to retrospective use. In ongoing monitoring, the right edge naturally has no “future” to borrow from anyway, so the newest workouts are already estimated from past data only. Practically, this could be made more efficient by fitting on rolling windows rather than the full history: for example, Stage 1 could be refit on a recent block of sessions to adapt to gradual changes in workout structure, while Stage 2 could be run on only the last ~100 sessions, since real pace changes are usually slow and the density surface mainly needs local history rather than the entire archive.</p>
+<p><strong>Future work.</strong> The same pipeline could be applied to other strokes — backstroke, breaststroke, butterfly — each with its own structural model.</p>
+</section>
+<section id="summary" class="level2">
+<h2 class="anchored" data-anchor-id="summary">Summary</h2>
+<p>Two GAMs, one purpose. The first reduces within-session structural variation (pacing, fatigue, rest, effort) to produce adjusted pace. The second smooths the adjusted pace distribution over calendar time and extracts its peak as a base pace estimate.</p>
+<p>The resulting base pace metric:</p>
+<ul>
+<li>Produces a running estimate that can be refreshed with each new session</li>
+<li>Is robust to effort variation (easy days don’t look like fitness drops)</li>
+<li>Captures mesocycle oscillations invisible to raw averages</li>
+<li>Showed the expected fitness peak heading into the La Jolla relay</li>
+</ul>
+<p>In the full retrospective version shown here, the surface borrows a little from the future as well as the past. For ongoing monitoring, though, the newest workout naturally sits at the right edge and has no future data available, so in practice the estimate there is already driven only by past sessions. A practical real-time implementation would therefore not need to rerun everything on the full archive: Stage 1 could be updated on a rolling window to stay calibrated to recent workout structure, and Stage 2 could use only the last ~100 sessions or so, since changes in true pace are slow and mostly local in time.</p>
+<p>The full extraction and analysis code is available on <a href="https://github.com/jbogomolovas2/swim-css-pipeline">GitHub</a>.</p>
+<hr>
+<p><em>Visualization and diagnostics built with <code>gratia</code><span class="citation" data-cites="gratia">(Simpson 2024)</span>. Model fitting via <code>mgcv</code><span class="citation" data-cites="wood2011 wood2017">(Wood 2011, 2017)</span>.</em></p>
+</section>
+<section id="references" class="level2">
+
+
+
+
+</section>
+
+<div id="quarto-appendix" class="default"><section class="quarto-appendix-contents" id="quarto-bibliography"><h2 class="anchored quarto-appendix-heading">References</h2><div id="refs" class="references csl-bib-body hanging-indent" data-entry-spacing="0">
+<div id="ref-gratia" class="csl-entry">
+Simpson, Gavin L. 2024. <em><span class="nocase">gratia</span>: Graceful Ggplot-Based Graphics and Other Functions for <span>GAMs</span> Fitted Using <span class="nocase">mgcv</span></em>. <a href="https://gavinsimpson.github.io/gratia/">https://gavinsimpson.github.io/gratia/</a>.
+</div>
+<div id="ref-FITfileR" class="csl-entry">
+Smith, Mike. 2025. <em><span>FITfileR</span>: Read <span>FIT</span> Files Using Only Native <span>R</span> Code</em>. <a href="https://github.com/grimbough/FITfileR">https://github.com/grimbough/FITfileR</a>.
+</div>
+<div id="ref-wood2011" class="csl-entry">
+Wood, Simon N. 2011. <span>“Fast Stable Restricted Maximum Likelihood and Marginal Likelihood Estimation of Semiparametric Generalized Linear Models.”</span> <em>Journal of the Royal Statistical Society: Series B</em> 73 (1): 3–36. <a href="https://doi.org/10.1111/j.1467-9868.2010.00749.x">https://doi.org/10.1111/j.1467-9868.2010.00749.x</a>.
+</div>
+<div id="ref-wood2017" class="csl-entry">
+———. 2017. <em>Generalized Additive Models: An Introduction with <span>R</span></em>. 2nd ed. Chapman; Hall/CRC. <a href="https://doi.org/10.1201/9781315370279">https://doi.org/10.1201/9781315370279</a>.
+</div>
+</div></section></div> ]]></description>
+  <category>R</category>
+  <category>GAM</category>
+  <category>Sports Analytics</category>
+  <category>Swimming</category>
+  <category>Time Series</category>
+  <guid>https://jbogomolovas2.github.io/Julius-s-Blog/posts/swim-css-pipeline/</guid>
+  <pubDate>Sat, 04 Apr 2026 07:00:00 GMT</pubDate>
+  <media:content url="https://jbogomolovas2.github.io/Julius-s-Blog/posts/swim-css-pipeline/IMG_9057.JPG" medium="image"/>
+</item>
 <item>
   <title>Cherry Bloom Prediction</title>
   <dc:creator>Julijus Bogomolovas</dc:creator>
