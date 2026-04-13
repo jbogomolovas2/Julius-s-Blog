@@ -4,12 +4,14 @@
     "items": [
       "/posts/cherry_post/index.html",
       "/posts/post-with-code/index.html",
+      "/posts/weight_fluctations/index.html",
       "/posts/swim-css-pipeline/index.html"
     ]
   },
   {
     "listing": "/index.html",
     "items": [
+      "/posts/weight_fluctations/index.html",
       "/posts/swim-css-pipeline/index.html",
       "/posts/cherry_post/index.html",
       "/posts/post-with-code/index.html",

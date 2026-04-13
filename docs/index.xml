@@ -15,7 +15,1685 @@
 <link>https://jbogomolovas2.github.io/Julius-s-Blog/</link>
 </image>
 <generator>quarto-1.7.32</generator>
-<lastBuildDate>Sat, 04 Apr 2026 07:00:00 GMT</lastBuildDate>
+<lastBuildDate>Sun, 12 Apr 2026 07:00:00 GMT</lastBuildDate>
+<item>
+  <title>Three Years of Daily Weight: What the Patterns Actually Are</title>
+  <dc:creator>Julius Bogomolovas</dc:creator>
+  <link>https://jbogomolovas2.github.io/Julius-s-Blog/posts/weight_fluctations/</link>
+  <description><![CDATA[ 
+
+
+
+
+
+<div class="cell">
+<details class="code-fold">
+<summary>Show code</summary>
+<div class="sourceCode cell-code" id="cb1" style="background: #f1f3f5;"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb1-1"><span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">library</span>(tidyverse)</span>
+<span id="cb1-2"><span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">library</span>(lubridate)</span>
+<span id="cb1-3"><span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">library</span>(mgcv)</span>
+<span id="cb1-4"><span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">library</span>(gratia)</span>
+<span id="cb1-5"><span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">library</span>(lomb)</span>
+<span id="cb1-6"><span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">library</span>(patchwork)</span>
+<span id="cb1-7"><span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">library</span>(performance)</span>
+<span id="cb1-8"></span>
+<span id="cb1-9"><span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">theme_set</span>(<span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">theme_minimal</span>(<span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">base_size =</span> <span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">12</span>))</span>
+<span id="cb1-10"></span>
+<span id="cb1-11">COL_RAW   <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"#adb5bd"</span></span>
+<span id="cb1-12">COL_FIT   <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"#2196F3"</span></span>
+<span id="cb1-13">COL_RESID <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"#E91E63"</span></span>
+<span id="cb1-14">COL_LOMB  <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"#FF9800"</span></span></code></pre></div>
+</details>
+</div>
+<section id="the-data" class="level2">
+<h2 class="anchored" data-anchor-id="the-data">The data</h2>
+<p>I’ve been weighing myself almost every morning with a Garmin scale since January 2022. Three years of data. The raw series looks noisy — but is it really just noise, or are there patterns at different timescales hiding inside it? So because of that “almost” I am dealing either irregularily spaced time series or time series with missing values, depending on how you look at it. This is a big no-no for standard time series analyses, that assume evenly spaced observations. Everything that follows uses methods that work directly on the irregular grid — no imputation, no gap-filling.</p>
+<div class="cell">
+<details class="code-fold">
+<summary>Show code</summary>
+<div class="sourceCode cell-code" id="cb2" style="background: #f1f3f5;"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb2-1"><span class="co" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;"># Load pre-processed data — generate weight_data.csv locally from</span></span>
+<span id="cb2-2"><span class="co" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;"># the raw Garmin JSON using run_once.R (not committed to repo)</span></span>
+<span id="cb2-3">weights <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">read_csv</span>(<span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"weight_data.csv"</span>, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">show_col_types =</span> <span class="cn" style="color: #8f5902;
+background-color: null;
+font-style: inherit;">FALSE</span>) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">|&gt;</span></span>
+<span id="cb2-4">  <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">mutate</span>(</span>
+<span id="cb2-5">    <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">t         =</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">as.numeric</span>(date <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">-</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">min</span>(date)),</span>
+<span id="cb2-6">    <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">dow_num   =</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">as.numeric</span>(<span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">wday</span>(date, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">week_start =</span> <span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">1</span>)),</span>
+<span id="cb2-7">    <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">month_num =</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">as.numeric</span>(<span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">month</span>(date))</span>
+<span id="cb2-8">  )</span>
+<span id="cb2-9"></span>
+<span id="cb2-10"><span class="co" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;"># Full daily grid — only used for reference, not for modelling</span></span>
+<span id="cb2-11">df_full <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">tibble</span>(<span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">date =</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">seq</span>(<span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">min</span>(weights<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">$</span>date), <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">max</span>(weights<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">$</span>date), <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">by =</span> <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"1 day"</span>)) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">|&gt;</span></span>
+<span id="cb2-12">  <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">left_join</span>(weights, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">by =</span> <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"date"</span>) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">|&gt;</span></span>
+<span id="cb2-13">  <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">mutate</span>(</span>
+<span id="cb2-14">    <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">t         =</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">as.numeric</span>(date <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">-</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">min</span>(date)),</span>
+<span id="cb2-15">    <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">dow_num   =</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">as.numeric</span>(<span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">wday</span>(date, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">week_start =</span> <span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">1</span>)),</span>
+<span id="cb2-16">    <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">month_num =</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">as.numeric</span>(<span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">month</span>(date))</span>
+<span id="cb2-17">  )</span>
+<span id="cb2-18"></span>
+<span id="cb2-19">n_obs     <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">nrow</span>(weights)</span>
+<span id="cb2-20">n_missing <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">sum</span>(<span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">is.na</span>(df_full<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">$</span>weight_kg))</span></code></pre></div>
+</details>
+</div>
+<div class="cell">
+<details class="code-fold">
+<summary>Show code</summary>
+<div class="sourceCode cell-code" id="cb3" style="background: #f1f3f5;"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb3-1"><span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">ggplot</span>(weights, <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">aes</span>(date, weight_kg)) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">+</span></span>
+<span id="cb3-2">  <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">geom_point</span>(<span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">colour =</span> COL_RAW, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">size =</span> <span class="fl" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">0.7</span>, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">alpha =</span> <span class="fl" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">0.5</span>) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">+</span></span>
+<span id="cb3-3">  <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">geom_smooth</span>(<span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">method =</span> <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"loess"</span>, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">span =</span> <span class="fl" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">0.12</span>,</span>
+<span id="cb3-4">              <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">colour =</span> COL_FIT, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">se =</span> <span class="cn" style="color: #8f5902;
+background-color: null;
+font-style: inherit;">FALSE</span>, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">linewidth =</span> <span class="fl" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">0.8</span>) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">+</span></span>
+<span id="cb3-5">  <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">labs</span>(</span>
+<span id="cb3-6">    <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">title    =</span> <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"Three years of daily weight"</span>,</span>
+<span id="cb3-7">    <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">subtitle =</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">sprintf</span>(</span>
+<span id="cb3-8">      <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"%d measurements, %d days missing (%.0f%%) — irregular time series"</span>,</span>
+<span id="cb3-9">      n_obs, n_missing, <span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">100</span> <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">*</span> n_missing <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">/</span> (n_obs <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">+</span> n_missing)</span>
+<span id="cb3-10">    ),</span>
+<span id="cb3-11">    <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">x =</span> <span class="cn" style="color: #8f5902;
+background-color: null;
+font-style: inherit;">NULL</span>, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">y =</span> <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"Weight (kg)"</span></span>
+<span id="cb3-12">  )</span></code></pre></div>
+</details>
+<div class="cell-output-display">
+<div>
+<figure class="figure">
+<p><img src="https://jbogomolovas2.github.io/Julius-s-Blog/posts/weight_fluctations/index_files/figure-html/plot-raw-1.png" class="img-fluid figure-img" width="960"></p>
+</figure>
+</div>
+</div>
+</div>
+<p>There’s clearly a lot going on: a long-term rise and fall, noticeable short-term wiggling and things in between. The question is how to decompose these cleanly.</p>
+</section>
+<section id="hunting-for-periods-lomb-scargle" class="level2">
+<h2 class="anchored" data-anchor-id="hunting-for-periods-lomb-scargle">Hunting for periods: Lomb-Scargle</h2>
+<p>Before fitting any model, it helps to know which timescales contain signal. The standard tool for this on an irregular grid is the <strong>Lomb-Scargle periodogram</strong> (<a href="https://doi.org/10.1076/brhm.30.2.178.1422">Ruf, 1999</a>). Unlike the FFT, it doesn’t require evenly spaced data — it fits sinusoids directly to whatever observations exist.</p>
+<div class="cell">
+<details class="code-fold">
+<summary>Show code</summary>
+<div class="sourceCode cell-code" id="cb4" style="background: #f1f3f5;"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb4-1">ls_raw <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">lsp</span>(weights<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">$</span>weight_kg, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">times =</span> weights<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">$</span>t,</span>
+<span id="cb4-2">              <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">type =</span> <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"period"</span>, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">ofac =</span> <span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">8</span>, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">from =</span> <span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">2</span>, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">to =</span> <span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">400</span>, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">plot =</span> <span class="cn" style="color: #8f5902;
+background-color: null;
+font-style: inherit;">FALSE</span>)</span>
+<span id="cb4-3"></span>
+<span id="cb4-4"><span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">tibble</span>(<span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">period =</span> ls_raw<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">$</span>scanned, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">power =</span> ls_raw<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">$</span>power) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">|&gt;</span></span>
+<span id="cb4-5">  <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">ggplot</span>(<span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">aes</span>(period, power)) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">+</span></span>
+<span id="cb4-6">  <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">geom_line</span>(<span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">colour =</span> COL_LOMB, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">linewidth =</span> <span class="fl" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">0.6</span>) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">+</span></span>
+<span id="cb4-7">  <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">geom_vline</span>(<span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">xintercept =</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">c</span>(<span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">7</span>, <span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">70</span>, <span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">113</span>, <span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">182</span>),</span>
+<span id="cb4-8">             <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">linetype =</span> <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"dotted"</span>, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">colour =</span> <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"grey50"</span>, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">linewidth =</span> <span class="fl" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">0.4</span>) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">+</span></span>
+<span id="cb4-9">  <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">annotate</span>(<span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"text"</span>, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">x =</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">c</span>(<span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">7</span>, <span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">70</span>, <span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">113</span>, <span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">182</span>), <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">y =</span> <span class="cn" style="color: #8f5902;
+background-color: null;
+font-style: inherit;">Inf</span>,</span>
+<span id="cb4-10">           <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">label =</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">c</span>(<span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"7d"</span>,<span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"70d"</span>,<span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"113d"</span>,<span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"182d"</span>),</span>
+<span id="cb4-11">           <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">vjust =</span> <span class="fl" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">1.4</span>, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">hjust =</span> <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">-</span><span class="fl" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">0.1</span>, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">size =</span> <span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">3</span>, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">colour =</span> <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"grey40"</span>) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">+</span></span>
+<span id="cb4-12">  <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">scale_x_log10</span>() <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">+</span></span>
+<span id="cb4-13">  <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">labs</span>(<span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">title =</span> <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"Lomb-Scargle periodogram — raw weight"</span>,</span>
+<span id="cb4-14">       <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">subtitle =</span> <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"No imputation needed — works directly on irregular observations"</span>,</span>
+<span id="cb4-15">       <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">x =</span> <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"Period (days, log scale)"</span>, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">y =</span> <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"L-S Power"</span>)</span></code></pre></div>
+</details>
+<div class="cell-output-display">
+<div>
+<figure class="figure">
+<p><img src="https://jbogomolovas2.github.io/Julius-s-Blog/posts/weight_fluctations/index_files/figure-html/lomb-raw-1.png" class="img-fluid figure-img" width="960"></p>
+</figure>
+</div>
+</div>
+</div>
+<p>Four things stand out: a sharp spike at <strong>7 days</strong>, a broad messy humps between <strong>70–182 days</strong>, and the spectrum rising again at long periods reflecting the overall trend. These are candidates, not conclusions — the periodogram tells us where energy is, not what it means.</p>
+</section>
+<section id="three-progressive-gams" class="level2">
+<h2 class="anchored" data-anchor-id="three-progressive-gams">Three progressive GAMs</h2>
+<p>GAMs handle missing data gracefully — they fit on observed rows only, no interpolation needed (<a href="https://doi.org/10.1201/9781315370279">Wood, 2017</a>; <a href="https://doi.org/10.1111/j.1467-9868.2010.00749.x">Wood, 2011</a>). The strategy is to build the model up one layer at a time and watch what each layer explains.</p>
+<p>The three models are:</p>
+<ul>
+<li><strong>M1</strong>: long-term trend only — <code>weight ~ s(t)</code></li>
+<li><strong>M2</strong>: trend + weekday rhythm — <code>weight ~ s(t) + s(weekday)</code><br>
+</li>
+<li><strong>M3</strong>: trend + weekday + seasonal — <code>weight ~ s(t) + s(weekday) + s(month)</code></li>
+</ul>
+<p><code>s(weekday)</code> and <code>s(month)</code> use cyclic cubic splines (<code>bs="cc"</code>) so that Sunday wraps back to Monday, and December wraps back to January. The <code>knots</code> argument sets the period correctly — boundary knots at 0.5/7.5 and 0.5/12.5 rather than at the data edges, which would collapse the endpoints.</p>
+<p>Model comparison uses the <code>performance</code> package (<a href="https://doi.org/10.21105/joss.03139">Lüdecke et al., 2021</a>), and smooth visualisation uses <code>gratia</code> (<a href="https://doi.org/10.21105/joss.06962">Simpson, 2024</a>).</p>
+<p>The trend smooth uses <code>k=10</code> — enough flexibility to track genuine multi-year drift, but stiff enough not to absorb the within-year seasonal pattern that <code>s(month)</code> should own.</p>
+<div class="cell">
+<details class="code-fold">
+<summary>Show code</summary>
+<div class="sourceCode cell-code" id="cb5" style="background: #f1f3f5;"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb5-1">knots_dow   <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">list</span>(<span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">dow_num   =</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">c</span>(<span class="fl" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">0.5</span>, <span class="fl" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">7.5</span>))</span>
+<span id="cb5-2">knots_month <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">list</span>(<span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">month_num =</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">c</span>(<span class="fl" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">0.5</span>, <span class="fl" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">12.5</span>))</span>
+<span id="cb5-3"></span>
+<span id="cb5-4">m1 <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">gam</span>(weight_kg <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">~</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">s</span>(t, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">k =</span> <span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">10</span>),</span>
+<span id="cb5-5">          <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">data =</span> weights, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">method =</span> <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"REML"</span>)</span>
+<span id="cb5-6"></span>
+<span id="cb5-7">m2 <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">gam</span>(weight_kg <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">~</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">s</span>(t, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">k =</span> <span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">10</span>) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">+</span></span>
+<span id="cb5-8">                       <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">s</span>(dow_num, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">bs =</span> <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"cc"</span>, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">k =</span> <span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">7</span>),</span>
+<span id="cb5-9">          <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">data =</span> weights, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">knots =</span> knots_dow, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">method =</span> <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"REML"</span>)</span>
+<span id="cb5-10"></span>
+<span id="cb5-11">m3 <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">gam</span>(weight_kg <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">~</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">s</span>(t, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">k =</span> <span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">10</span>) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">+</span></span>
+<span id="cb5-12">                       <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">s</span>(dow_num,   <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">bs =</span> <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"cc"</span>, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">k =</span> <span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">7</span>) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">+</span></span>
+<span id="cb5-13">                       <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">s</span>(month_num, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">bs =</span> <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"cc"</span>, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">k =</span> <span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">12</span>),</span>
+<span id="cb5-14">          <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">data =</span> weights, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">knots =</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">c</span>(knots_dow, knots_month), <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">method =</span> <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"REML"</span>)</span></code></pre></div>
+</details>
+</div>
+<div class="cell">
+<details class="code-fold">
+<summary>Show code</summary>
+<div class="sourceCode cell-code" id="cb6" style="background: #f1f3f5;"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb6-1"><span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">compare_performance</span>(m1, m2, m3) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">|&gt;</span></span>
+<span id="cb6-2">  <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">as.data.frame</span>() <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">|&gt;</span></span>
+<span id="cb6-3">  <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">select</span>(Name, AIC, AICc, BIC, R2, RMSE) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">|&gt;</span></span>
+<span id="cb6-4">  knitr<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">::</span><span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">kable</span>(<span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">digits =</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">c</span>(<span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">0</span>, <span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">1</span>, <span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">1</span>, <span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">1</span>, <span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">3</span>, <span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">3</span>),</span>
+<span id="cb6-5">               <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">caption =</span> <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"Model comparison — each added layer earns its place"</span>)</span></code></pre></div>
+</details>
+<div class="cell-output-display">
+<table class="caption-top table table-sm table-striped small">
+<caption>Model comparison — each added layer earns its place</caption>
+<thead>
+<tr class="header">
+<th style="text-align: left;">Name</th>
+<th style="text-align: right;">AIC</th>
+<th style="text-align: right;">AICc</th>
+<th style="text-align: right;">BIC</th>
+<th style="text-align: right;">R2</th>
+<th style="text-align: right;">RMSE</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td style="text-align: left;">m1</td>
+<td style="text-align: right;">3081.0</td>
+<td style="text-align: right;">3081.2</td>
+<td style="text-align: right;">3135.4</td>
+<td style="text-align: right;">0.683</td>
+<td style="text-align: right;">1.017</td>
+</tr>
+<tr class="even">
+<td style="text-align: left;">m2</td>
+<td style="text-align: right;">2999.5</td>
+<td style="text-align: right;">2999.9</td>
+<td style="text-align: right;">3070.9</td>
+<td style="text-align: right;">0.707</td>
+<td style="text-align: right;">0.976</td>
+</tr>
+<tr class="odd">
+<td style="text-align: left;">m3</td>
+<td style="text-align: right;">2745.0</td>
+<td style="text-align: right;">2746.0</td>
+<td style="text-align: right;">2857.5</td>
+<td style="text-align: right;">0.771</td>
+<td style="text-align: right;">0.859</td>
+</tr>
+</tbody>
+</table>
+</div>
+</div>
+<p>Each layer earns its place. AIC drops ~90 points adding weekday, then another ~100 adding seasonal. BIC agrees — these terms aren’t overfitting, they’re explaining real structure. The final RMSE of ~0.85 kg is the irreducible day-to-day scatter: meal timing, hydration, measurement noise.</p>
+<p>One modelling decision is worth unpacking. The trend smooth <code>s(t)</code> has a tuning parameter <code>k</code> that controls how flexible it is. Crank it up and the trend can wiggle at multi-month timescales — at which point it starts absorbing the seasonal pattern that <code>s(month)</code> is supposed to own. The two smooths compete for the same variance, and the flexible trend wins. Drop <code>k</code> back down and the seasonal smooth recovers, but you’ve lost some fit.</p>
+<p>This tension is familiar in classical time series decomposition, but it usually resolves cleanly. In the famous textbook example airline passenger dataset seasons are sharp, regular, and large relative to the trend. There’s no ambiguity about what belongs where. Weight data is messier. The “seasonal” pattern here is real but modest (~3 kg peak-to-trough), and the trend itself drifts and curves in ways that overlap with multi-month timescales. In ecology you face the same problem: a population that crashes every winter looks periodic, but a population recovering from a disturbance looks like trend, and if both happen simultaneously the decomposition is a judgement call, not a fact.</p>
+<p>The choice I made — <code>k=10</code>, roughly one degree of freedom per four months — keeps the trend smooth enough that <code>s(month)</code> gets to explain the repeating annual structure, while still tracking genuine multi-year drift. It’s a modelling choice, not a discovery. The data can’t tell you where the trend ends and the cycle begins.</p>
+</section>
+<section id="what-the-model-found" class="level2">
+<h2 class="anchored" data-anchor-id="what-the-model-found">What the model found</h2>
+<div class="cell">
+<details class="code-fold">
+<summary>Show code</summary>
+<div class="sourceCode cell-code" id="cb7" style="background: #f1f3f5;"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb7-1"><span class="co" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;"># Trend with CI</span></span>
+<span id="cb7-2">sm_trend <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">smooth_estimates</span>(</span>
+<span id="cb7-3">  m3, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">select =</span> <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"s(t)"</span>,</span>
+<span id="cb7-4">  <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">data =</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">tibble</span>(<span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">t         =</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">seq</span>(<span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">min</span>(weights<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">$</span>t), <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">max</span>(weights<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">$</span>t), <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">length.out =</span> <span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">500</span>),</span>
+<span id="cb7-5">                <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">dow_num   =</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">mean</span>(weights<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">$</span>dow_num),</span>
+<span id="cb7-6">                <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">month_num =</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">mean</span>(weights<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">$</span>month_num))</span>
+<span id="cb7-7">) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">|&gt;</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">add_confint</span>() <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">|&gt;</span></span>
+<span id="cb7-8">  <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">mutate</span>(</span>
+<span id="cb7-9">    <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">.estimate =</span> .estimate <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">+</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">coef</span>(m3)[<span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">1</span>],</span>
+<span id="cb7-10">    <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">.lower_ci =</span> .lower_ci <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">+</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">coef</span>(m3)[<span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">1</span>],</span>
+<span id="cb7-11">    <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">.upper_ci =</span> .upper_ci <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">+</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">coef</span>(m3)[<span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">1</span>],</span>
+<span id="cb7-12">    <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">date      =</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">min</span>(weights<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">$</span>date) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">+</span> t</span>
+<span id="cb7-13">  )</span>
+<span id="cb7-14"></span>
+<span id="cb7-15"><span class="co" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;"># Weekday smooth</span></span>
+<span id="cb7-16">sm_dow <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">smooth_estimates</span>(</span>
+<span id="cb7-17">  m3, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">select =</span> <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"s(dow_num)"</span>,</span>
+<span id="cb7-18">  <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">data =</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">tibble</span>(<span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">dow_num   =</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">seq</span>(<span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">1</span>, <span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">7</span>, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">by =</span> <span class="fl" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">0.05</span>),</span>
+<span id="cb7-19">                <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">month_num =</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">mean</span>(weights<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">$</span>month_num),</span>
+<span id="cb7-20">                <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">t         =</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">mean</span>(weights<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">$</span>t))</span>
+<span id="cb7-21">) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">|&gt;</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">add_confint</span>()</span>
+<span id="cb7-22"></span>
+<span id="cb7-23"><span class="co" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;"># Seasonal smooth</span></span>
+<span id="cb7-24">sm_month <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">smooth_estimates</span>(</span>
+<span id="cb7-25">  m3, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">select =</span> <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"s(month_num)"</span>,</span>
+<span id="cb7-26">  <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">data =</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">tibble</span>(<span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">month_num =</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">seq</span>(<span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">1</span>, <span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">12</span>, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">by =</span> <span class="fl" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">0.05</span>),</span>
+<span id="cb7-27">                <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">dow_num   =</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">mean</span>(weights<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">$</span>dow_num),</span>
+<span id="cb7-28">                <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">t         =</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">mean</span>(weights<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">$</span>t))</span>
+<span id="cb7-29">) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">|&gt;</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">add_confint</span>()</span>
+<span id="cb7-30"></span>
+<span id="cb7-31">p_fit <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">ggplot</span>() <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">+</span></span>
+<span id="cb7-32">  <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">geom_point</span>(<span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">data =</span> weights, <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">aes</span>(date, weight_kg),</span>
+<span id="cb7-33">             <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">colour =</span> COL_RAW, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">size =</span> <span class="fl" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">0.6</span>, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">alpha =</span> <span class="fl" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">0.4</span>) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">+</span></span>
+<span id="cb7-34">  <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">geom_ribbon</span>(<span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">data =</span> sm_trend, <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">aes</span>(date, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">ymin =</span> .lower_ci, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">ymax =</span> .upper_ci),</span>
+<span id="cb7-35">              <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">fill =</span> COL_FIT, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">alpha =</span> <span class="fl" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">0.2</span>) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">+</span></span>
+<span id="cb7-36">  <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">geom_line</span>(<span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">data =</span> sm_trend, <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">aes</span>(date, .estimate),</span>
+<span id="cb7-37">            <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">colour =</span> COL_FIT, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">linewidth =</span> <span class="fl" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">0.9</span>) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">+</span></span>
+<span id="cb7-38">  <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">labs</span>(<span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">title =</span> <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"Long-term trend"</span>,</span>
+<span id="cb7-39">       <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">subtitle =</span> <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"s(t) only — weekday and seasonal effects removed"</span>,</span>
+<span id="cb7-40">       <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">x =</span> <span class="cn" style="color: #8f5902;
+background-color: null;
+font-style: inherit;">NULL</span>, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">y =</span> <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"Weight (kg)"</span>)</span>
+<span id="cb7-41"></span>
+<span id="cb7-42">p_dow <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">ggplot</span>(sm_dow, <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">aes</span>(dow_num, .estimate)) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">+</span></span>
+<span id="cb7-43">  <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">geom_ribbon</span>(<span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">aes</span>(<span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">ymin =</span> .lower_ci, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">ymax =</span> .upper_ci), <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">fill =</span> COL_FIT, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">alpha =</span> <span class="fl" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">0.2</span>) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">+</span></span>
+<span id="cb7-44">  <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">geom_line</span>(<span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">colour =</span> COL_FIT, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">linewidth =</span> <span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">1</span>) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">+</span></span>
+<span id="cb7-45">  <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">geom_hline</span>(<span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">yintercept =</span> <span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">0</span>, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">linetype =</span> <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"dashed"</span>, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">alpha =</span> <span class="fl" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">0.3</span>) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">+</span></span>
+<span id="cb7-46">  <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">scale_x_continuous</span>(<span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">breaks =</span> <span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">1</span><span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">:</span><span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">7</span>,</span>
+<span id="cb7-47">                     <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">labels =</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">c</span>(<span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"Mon"</span>,<span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"Tue"</span>,<span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"Wed"</span>,<span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"Thu"</span>,<span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"Fri"</span>,<span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"Sat"</span>,<span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"Sun"</span>)) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">+</span></span>
+<span id="cb7-48">  <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">labs</span>(<span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">title =</span> <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"Weekday effect"</span>, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">x =</span> <span class="cn" style="color: #8f5902;
+background-color: null;
+font-style: inherit;">NULL</span>, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">y =</span> <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"Effect (kg)"</span>)</span>
+<span id="cb7-49"></span>
+<span id="cb7-50">p_month <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">ggplot</span>(sm_month, <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">aes</span>(month_num, .estimate)) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">+</span></span>
+<span id="cb7-51">  <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">geom_ribbon</span>(<span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">aes</span>(<span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">ymin =</span> .lower_ci, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">ymax =</span> .upper_ci), <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">fill =</span> COL_RESID, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">alpha =</span> <span class="fl" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">0.2</span>) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">+</span></span>
+<span id="cb7-52">  <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">geom_line</span>(<span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">colour =</span> COL_RESID, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">linewidth =</span> <span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">1</span>) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">+</span></span>
+<span id="cb7-53">  <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">geom_hline</span>(<span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">yintercept =</span> <span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">0</span>, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">linetype =</span> <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"dashed"</span>, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">alpha =</span> <span class="fl" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">0.3</span>) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">+</span></span>
+<span id="cb7-54">  <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">scale_x_continuous</span>(<span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">breaks =</span> <span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">1</span><span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">:</span><span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">12</span>, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">labels =</span> month.abb) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">+</span></span>
+<span id="cb7-55">  <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">labs</span>(<span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">title =</span> <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"Seasonal effect"</span>, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">x =</span> <span class="cn" style="color: #8f5902;
+background-color: null;
+font-style: inherit;">NULL</span>, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">y =</span> <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"Effect (kg)"</span>)</span>
+<span id="cb7-56"></span>
+<span id="cb7-57">p_fit <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">/</span> (p_dow <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">|</span> p_month)</span></code></pre></div>
+</details>
+<div class="cell-output-display">
+<div>
+<figure class="figure">
+<p><img src="https://jbogomolovas2.github.io/Julius-s-Blog/posts/weight_fluctations/index_files/figure-html/plot-components-1.png" class="img-fluid figure-img" width="960"></p>
+</figure>
+</div>
+</div>
+</div>
+<p>Three things jump out:</p>
+<p><strong>The long-term trend</strong> rose about 5 kg from early 2022 to mid-2024, then came back down. Not a linear drift — more like a slow wave.</p>
+<p><strong>The weekly pattern</strong> is ±0.35 kg and the shape is clean: heaviest on Monday, declining through the week, lightest around Thursday, with a small rebound heading into the weekend. It maps almost perfectly onto the Lomb-Scargle 7-day spike — which turns out to be nothing more exotic than weekday eating habits. This pattern isn’t unique to me: <a href="https://doi.org/10.1159/000356147">Orsama et al.&nbsp;(2014)</a> found the same Monday peak and Friday trough in 80 adults across four studies, and <a href="https://doi.org/10.1371/journal.pone.0232152">Turicchi et al.&nbsp;(2020)</a> replicated it in over 1,400 participants across three European countries. The weekly rhythm in body weight appears to be a near-universal feature of modern life, not a biological clock.</p>
+<p><strong>The seasonal pattern</strong> is a ~3 kg swing from January (heaviest) to August–September (lightest), recovering towards December. <a href="https://doi.org/10.1371/journal.pone.0232152">Turicchi et al.&nbsp;(2020)</a> observed similar seasonal fluctuations in a large European cohort, with patterns largely driven by holiday-period weight gain and summer reduction.</p>
+</section>
+<section id="what-the-model-didnt-explain-the-lomb-scargle-cascade" class="level2">
+<h2 class="anchored" data-anchor-id="what-the-model-didnt-explain-the-lomb-scargle-cascade">What the model didn’t explain: the Lomb-Scargle cascade</h2>
+<p>Now for the most interesting part. If the GAM captured the real periodic structure, its residuals should be white noise. Let’s check by running Lomb-Scargle on the residuals of each model — the same tool we started with, now used to audit what’s left over.</p>
+<div class="cell">
+<details class="code-fold">
+<summary>Show code</summary>
+<div class="sourceCode cell-code" id="cb8" style="background: #f1f3f5;"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb8-1">weights <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> weights <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">|&gt;</span></span>
+<span id="cb8-2">  <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">mutate</span>(</span>
+<span id="cb8-3">    <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">resid_m1 =</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">residuals</span>(m1),</span>
+<span id="cb8-4">    <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">resid_m2 =</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">residuals</span>(m2),</span>
+<span id="cb8-5">    <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">resid_m3 =</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">residuals</span>(m3)</span>
+<span id="cb8-6">  )</span>
+<span id="cb8-7"></span>
+<span id="cb8-8">ls_df <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> <span class="cf" style="color: #003B4F;
+background-color: null;
+font-weight: bold;
+font-style: inherit;">function</span>(x, t, label) {</span>
+<span id="cb8-9">  ls <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">lsp</span>(x, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">times =</span> t, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">type =</span> <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"period"</span>, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">ofac =</span> <span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">8</span>, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">from =</span> <span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">2</span>, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">to =</span> <span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">400</span>, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">plot =</span> <span class="cn" style="color: #8f5902;
+background-color: null;
+font-style: inherit;">FALSE</span>)</span>
+<span id="cb8-10">  <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">tibble</span>(<span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">period =</span> ls<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">$</span>scanned, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">power =</span> ls<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">$</span>power, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">model =</span> label)</span>
+<span id="cb8-11">}</span>
+<span id="cb8-12"></span>
+<span id="cb8-13">ls_all <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">bind_rows</span>(</span>
+<span id="cb8-14">  <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">ls_df</span>(weights<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">$</span>weight_kg, weights<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">$</span>t, <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"Raw data"</span>),</span>
+<span id="cb8-15">  <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">ls_df</span>(weights<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">$</span>resid_m1,  weights<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">$</span>t, <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"M1: trend removed"</span>),</span>
+<span id="cb8-16">  <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">ls_df</span>(weights<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">$</span>resid_m2,  weights<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">$</span>t, <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"M2: + weekday"</span>),</span>
+<span id="cb8-17">  <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">ls_df</span>(weights<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">$</span>resid_m3,  weights<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">$</span>t, <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"M3: + weekday + seasonal"</span>)</span>
+<span id="cb8-18">) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">|&gt;</span></span>
+<span id="cb8-19">  <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">mutate</span>(<span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">model =</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">factor</span>(model, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">levels =</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">c</span>(<span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"Raw data"</span>,</span>
+<span id="cb8-20">                                          <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"M1: trend removed"</span>,</span>
+<span id="cb8-21">                                          <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"M2: + weekday"</span>,</span>
+<span id="cb8-22">                                          <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"M3: + weekday + seasonal"</span>)))</span>
+<span id="cb8-23"></span>
+<span id="cb8-24">model_colours <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">c</span>(</span>
+<span id="cb8-25">  <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"Raw data"</span>                 <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">=</span> <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"#2c3e50"</span>,</span>
+<span id="cb8-26">  <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"M1: trend removed"</span>        <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">=</span> <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"#e67e22"</span>,</span>
+<span id="cb8-27">  <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"M2: + weekday"</span>            <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">=</span> <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"#e74c3c"</span>,</span>
+<span id="cb8-28">  <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"M3: + weekday + seasonal"</span> <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">=</span> <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"#9b59b6"</span></span>
+<span id="cb8-29">)</span>
+<span id="cb8-30"></span>
+<span id="cb8-31">ref_lines <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">tibble</span>(</span>
+<span id="cb8-32">  <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">period =</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">c</span>(<span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">7</span>, <span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">70</span>, <span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">113</span>, <span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">182</span>),</span>
+<span id="cb8-33">  <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">label  =</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">c</span>(<span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"7d"</span>,<span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"70d"</span>,<span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"113d"</span>,<span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"182d"</span>)</span>
+<span id="cb8-34">)</span>
+<span id="cb8-35"></span>
+<span id="cb8-36"><span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">ggplot</span>(ls_all, <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">aes</span>(period, power, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">colour =</span> model)) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">+</span></span>
+<span id="cb8-37">  <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">geom_line</span>(<span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">linewidth =</span> <span class="fl" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">0.6</span>) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">+</span></span>
+<span id="cb8-38">  <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">geom_vline</span>(<span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">data =</span> ref_lines, <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">aes</span>(<span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">xintercept =</span> period),</span>
+<span id="cb8-39">             <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">linetype =</span> <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"dotted"</span>, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">colour =</span> <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"grey60"</span>, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">linewidth =</span> <span class="fl" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">0.4</span>,</span>
+<span id="cb8-40">             <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">inherit.aes =</span> <span class="cn" style="color: #8f5902;
+background-color: null;
+font-style: inherit;">FALSE</span>) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">+</span></span>
+<span id="cb8-41">  <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">geom_text</span>(<span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">data =</span> ref_lines, <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">aes</span>(<span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">x =</span> period, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">y =</span> <span class="cn" style="color: #8f5902;
+background-color: null;
+font-style: inherit;">Inf</span>, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">label =</span> label),</span>
+<span id="cb8-42">            <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">inherit.aes =</span> <span class="cn" style="color: #8f5902;
+background-color: null;
+font-style: inherit;">FALSE</span>, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">vjust =</span> <span class="fl" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">1.4</span>, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">hjust =</span> <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">-</span><span class="fl" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">0.1</span>,</span>
+<span id="cb8-43">            <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">size =</span> <span class="fl" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">2.8</span>, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">colour =</span> <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"grey40"</span>) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">+</span></span>
+<span id="cb8-44">  <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">scale_x_log10</span>() <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">+</span></span>
+<span id="cb8-45">  <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">scale_colour_manual</span>(<span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">values =</span> model_colours) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">+</span></span>
+<span id="cb8-46">  <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">facet_wrap</span>(<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">~</span>model, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">ncol =</span> <span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">1</span>, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">scales =</span> <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"fixed"</span>) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">+</span></span>
+<span id="cb8-47">  <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">labs</span>(<span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">title =</span> <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"Lomb-Scargle cascade — what each model layer removes"</span>,</span>
+<span id="cb8-48">       <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">subtitle =</span> <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"Shared Y axis: 7d spike gone after M2, but 70–182d band persists throughout"</span>,</span>
+<span id="cb8-49">       <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">x =</span> <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"Period (days, log scale)"</span>, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">y =</span> <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"L-S Power"</span>) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">+</span></span>
+<span id="cb8-50">  <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">theme</span>(<span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">legend.position =</span> <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"none"</span>)</span></code></pre></div>
+</details>
+<div class="cell-output-display">
+<div>
+<figure class="figure">
+<p><img src="https://jbogomolovas2.github.io/Julius-s-Blog/posts/weight_fluctations/index_files/figure-html/lomb-cascade-1.png" class="img-fluid figure-img" width="960"></p>
+</figure>
+</div>
+</div>
+</div>
+<p>So few things pop up after comparing original periodogram to our model reisduals. Firstly our weekly smooth removes 7 day peak. Bazinga! Now the yearly smooth affects low frequency region. So definintely there is something there and yearly smooth at least partly explains it. But with 3.2 years of data I have very few long-period cycles, and the periodogram becomes unreliable at these frequencies. Whats stands out are 70 and 113 day peaks that remain largely “unseen” by mmodels. Wiht ~16 periods in dataset thats real signal. It will be interesting to pin them down!</p>
+<p>A few directions from here:</p>
+<ul>
+<li><strong>Find the phase anchor for the 70 and 113d peaks</strong> The period is known; the question is what external variable marks the start of each cycle.</li>
+<li><strong>Low-frequency band (&gt;150d): treat with caution.</strong> Peaks here are broad, the data is short, and the seasonal smooth interacts with this region in ways that are hard to disentangle. Wavelet analysis would show whether the energy is episodic or continuous — and whether the apparent period drifts over time.</li>
+<li><strong>Time-varying seasonal amplitude.</strong> <code>s(month)</code> assumes the annual pattern has the same shape every year. If the winter weight gain was larger in one year than another, that variation ends up in the residuals. A time-varying extension would let the seasonal amplitude float.</li>
+</ul>
+<table class="caption-top table">
+<colgroup>
+<col style="width: 33%">
+<col style="width: 33%">
+<col style="width: 33%">
+</colgroup>
+<thead>
+<tr class="header">
+<th>Component</th>
+<th>Amplitude</th>
+<th>Character</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td>Weekly rhythm</td>
+<td>±0.35 kg</td>
+<td>Explained — weekday eating</td>
+</tr>
+<tr class="even">
+<td>Seasonal drift</td>
+<td>~3 kg Jan→Sep</td>
+<td>Explained — average annual cycle</td>
+</tr>
+<tr class="odd">
+<td>Long-term trend</td>
+<td>~5 kg over 3 yrs</td>
+<td>Explained — slow drift</td>
+</tr>
+<tr class="even">
+<td>70 and 113d peaks</td>
+<td>~0.3–0.5 kg</td>
+<td>Unexplained — period known, phase missing</td>
+</tr>
+<tr class="odd">
+<td>&gt;150d band</td>
+<td>unclear</td>
+<td>Unreliable at this data length</td>
+</tr>
+</tbody>
+</table>
+</section>
+<section id="references" class="level2">
+<h2 class="anchored" data-anchor-id="references">References</h2>
+<p><strong>Data papers</strong></p>
+<ul>
+<li>Orsama et al.&nbsp;(2014). Weight rhythms: Weight increases during weekends and decreases during weekdays. <em>Obesity Facts</em>, 7, 36–47. <a href="https://doi.org/10.1159/000356147" class="uri">https://doi.org/10.1159/000356147</a></li>
+<li>Turicchi et al.&nbsp;(2020). Weekly, seasonal and holiday body weight fluctuation patterns. <em>PLOS ONE</em>, 15(4), e0232152. <a href="https://doi.org/10.1371/journal.pone.0232152" class="uri">https://doi.org/10.1371/journal.pone.0232152</a></li>
+</ul>
+<p><strong>R packages</strong></p>
+<ul>
+<li>Wood, S.N. (2017). <em>Generalized Additive Models: An Introduction with R</em> (2nd ed.). Chapman and Hall/CRC.</li>
+<li>Wood, S.N. (2011). Fast stable REML and ML estimation of semiparametric GLMs. <em>JRSS-B</em>, 73(1), 3–36.</li>
+<li>Simpson, G.L. (2024). gratia: An R package for exploring GAMs. <em>JOSS</em>, 9(104), 6962. <a href="https://doi.org/10.21105/joss.06962" class="uri">https://doi.org/10.21105/joss.06962</a></li>
+<li>Ruf, T. (1999). The Lomb-Scargle periodogram in biological rhythm research. <em>Biological Rhythm Research</em>, 30, 178–201.</li>
+<li>Wickham et al.&nbsp;(2019). Welcome to the tidyverse. <em>JOSS</em>, 4(43), 1686. <a href="https://doi.org/10.21105/joss.01686" class="uri">https://doi.org/10.21105/joss.01686</a></li>
+<li>Lüdecke et al.&nbsp;(2021). performance: An R package for assessment of statistical models. <em>JOSS</em>, 6(60), 3139. <a href="https://doi.org/10.21105/joss.03139" class="uri">https://doi.org/10.21105/joss.03139</a></li>
+<li>Pedersen, T.L. (2025). patchwork: The composer of plots. <a href="https://doi.org/10.32614/CRAN.package.patchwork" class="uri">https://doi.org/10.32614/CRAN.package.patchwork</a></li>
+</ul>
+
+
+</section>
+
+ ]]></description>
+  <category>R</category>
+  <category>GAM</category>
+  <category>Biometrics</category>
+  <category>Time Series</category>
+  <guid>https://jbogomolovas2.github.io/Julius-s-Blog/posts/weight_fluctations/</guid>
+  <pubDate>Sun, 12 Apr 2026 07:00:00 GMT</pubDate>
+  <media:content url="https://jbogomolovas2.github.io/Julius-s-Blog/posts/weight_fluctations/food.png" medium="image" type="image/png" height="96" width="144"/>
+</item>
 <item>
   <title>What’s Your Base? Estimating Swimming Fitness from Routine Training Data</title>
   <dc:creator>Julius Bogomolovas</dc:creator>
