@@ -10,7 +10,294 @@
 <atom:link href="https://jbogomolovas2.github.io/Julius-s-Blog/r-posts.xml" rel="self" type="application/rss+xml"/>
 <description>Data Science, Swimming Analytics, and R Programming</description>
 <generator>quarto-1.7.32</generator>
-<lastBuildDate>Sun, 19 Apr 2026 07:00:00 GMT</lastBuildDate>
+<lastBuildDate>Sat, 02 May 2026 07:00:00 GMT</lastBuildDate>
+<item>
+  <title>“And I’m looking for the funnies”: sentiment in Lithuanian news headlines</title>
+  <dc:creator>Julius Bogomolovas</dc:creator>
+  <link>https://jbogomolovas2.github.io/Julius-s-Blog/posts/sentiment_analysis/</link>
+  <description><![CDATA[ 
+
+
+
+
+
+<p>There’s a moment in Suzanne Vega’s <em>Tom’s Diner</em> where the narrator picks up a newspaper, skips the stories, and goes straight to the funnies. It’s a small, accurate observation about reading the news: most of it doesn’t feel good, so you protect yourself.</p>
+<p>I wanted to know how true that is, in numbers. Are Lithuanian news headlines as relentlessly negative as they feel? Are some outlets more negative than others?</p>
+<p>To find out, I built a small system that hourly pulls RSS feeds from 7 Lithuanian outlets, deduplicates by URL, and sends each new headline to Claude Sonnet 4.6. The model returns three things: a sentiment score in [-1, +1], an IPTC Media Topic label (one of 17 international press categories like <em>politics</em>, <em>sport</em>, <em>crime, law and justice</em>), and up to three named entities.</p>
+<p>Two things made this approach attractive. First, Lithuanian is heavily inflected and has limited classical NLP tooling, so a frontier multilingual model handles it cleanly without needing to train anything. Second, using IPTC’s controlled vocabulary instead of letting the model invent topic labels makes per-topic comparisons coherent across outlets. Cost is about $0.001 per headline.</p>
+<p>After a week, I had 4,832 scored headlines spanning 9 days. Here’s the distribution of sentiment scores:</p>
+<p><em>Examples below appear in the original Lithuanian with English translations.</em></p>
+<div class="cell" data-layout-align="center">
+<div class="cell-output-display">
+<div class="quarto-figure quarto-figure-center">
+<figure class="figure">
+<p><img src="https://jbogomolovas2.github.io/Julius-s-Blog/posts/sentiment_analysis/index_files/figure-html/plot1_distribution-1.png" class="img-fluid quarto-figure quarto-figure-center figure-img" width="960"></p>
+</figure>
+</div>
+</div>
+</div>
+<p>To make the score concrete, here are real processed headlines from the dataset at three different sentiment levels and topics. Claude does a pretty good job.</p>
+<div class="cell" data-layout-align="center">
+<div class="cell-output-display">
+<table class="caption-top table table-sm table-striped small">
+<caption>Example headlines at three sentiment levels</caption>
+<colgroup>
+<col style="width: 2%">
+<col style="width: 17%">
+<col style="width: 36%">
+<col style="width: 43%">
+</colgroup>
+<thead>
+<tr class="header">
+<th style="text-align: left;">Score</th>
+<th style="text-align: left;">Topic</th>
+<th style="text-align: left;">Lithuanian</th>
+<th style="text-align: left;">English</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td style="text-align: left;">-0.7</td>
+<td style="text-align: left;">disaster, accident and emergency incident</td>
+<td style="text-align: left;">Vilkaviškyje dingo iš ligoninės pasišalinęs nepilnametis</td>
+<td style="text-align: left;">A minor went missing after leaving a hospital in Vilkaviškis</td>
+</tr>
+<tr class="even">
+<td style="text-align: left;">0.0</td>
+<td style="text-align: left;">economy, business and finance</td>
+<td style="text-align: left;">Klausiate, atsakome. Ar antstoliai nuskaitys atgautas antrosios pensijų pakopos lėšas?</td>
+<td style="text-align: left;">Q&amp;A on whether bailiffs will deduct recovered second-pillar pension funds</td>
+</tr>
+<tr class="odd">
+<td style="text-align: left;">+0.7</td>
+<td style="text-align: left;">education</td>
+<td style="text-align: left;">Klaipėdos Vydūno gimnazijos pirmokai Lietuvai atstovaus robotikos čempionate Honkonge</td>
+<td style="text-align: left;">Klaipėda’s Vydūnas Gymnasium first-years will represent Lithuania at a robotics championship in Hong Kong</td>
+</tr>
+</tbody>
+</table>
+</div>
+</div>
+<p>The distribution is clearly bimodal, with two humps separated by a trough at zero. Headlines exist to provoke; pure neutrality is rare. Most lean one way or the other, and few are ambivalent.</p>
+<p>So I went looking for differences between outlets. The chart said <code>15min.lt</code> was the most negative outlet in Lithuania. The chart was wrong. Not because the number was wrong, but because the comparison wasn’t fair. Here’s what went wrong, and what the data actually shows.</p>
+<section id="the-first-wrong-finding" class="level1 unnumbered">
+<h1 class="unnumbered">The first (wrong) finding</h1>
+<p>I plotted mean sentiment per outlet, ranked them, and got this:</p>
+<div class="cell" data-layout-align="center">
+<div class="cell-output-display">
+<div class="quarto-figure quarto-figure-center">
+<figure class="figure">
+<p><img src="https://jbogomolovas2.github.io/Julius-s-Blog/posts/sentiment_analysis/index_files/figure-html/plot2_naive-1.png" class="img-fluid quarto-figure quarto-figure-center figure-img" width="960"></p>
+</figure>
+</div>
+</div>
+</div>
+<p>By this measure, 15min sits noticeably below everyone else. If I had published this as the result, it would have looked clean and confident, and it would have been misleading.</p>
+</section>
+<section id="what-i-missed" class="level1 unnumbered">
+<h1 class="unnumbered">What I missed</h1>
+<p>Outlets cover different mixes of topics, and topics carry their own sentiment baseline. Crime headlines are negative everywhere; sport headlines are positive everywhere. So a fair comparison has to account for what each outlet writes about, not just how their headlines score on average.</p>
+</section>
+<section id="what-the-model-says" class="level1 unnumbered">
+<h1 class="unnumbered">What the model says</h1>
+<p>The right tool is <strong>partial pooling with a hierarchical Bayesian model</strong>. The intuition: every headline’s sentiment is a sum of effects, namely what topic it’s about, which outlet wrote it, and whether this particular outlet treats this particular topic differently from average. The model estimates each piece simultaneously and shrinks small-sample estimates toward the population mean. So an outlet with three crime headlines doesn’t get to claim a wildly different “crime tone” from one with three hundred. Its estimate gets pulled toward what we know about crime coverage in general.</p>
+<p>Three modelling choices need a brief defence:</p>
+<p><strong>Why ordinal, not Gaussian?</strong> A linear regression on sentiment treats the score as if it were continuous and normally distributed. It isn’t. The scores live on 21 discrete rungs from -1.0 to +1.0 in steps of 0.1, and the histogram you saw earlier is bimodal, not bell-shaped. Fitting a Gaussian model gives sensible <em>rankings</em> but unreliable uncertainty estimates and ugly posterior predictive checks. Cumulative ordinal regression handles the discrete, bimodal structure natively.</p>
+<p><strong>Why Bayesian, not frequentist?</strong> I fit several frequentist models first as sanity checks (<code>lm</code>, <code>polr</code>, <code>clmm</code>), and they all agreed on the substantive answer. The Bayesian fit adds three things the frequentist alternatives can’t: honest credible intervals on variance components (especially important when the source-level variance is genuinely small and a frequentist point estimate near zero is misleading), proper partial pooling that’s robust to sparse cells in the source by topic interaction, and posterior distributions that visualise uncertainty as shape rather than as a confidence-interval bar.</p>
+<p><strong>Why the source by topic interaction?</strong> Without it, “outlets are similar on average” would be the only thing the model could say. The interaction term is what lets us ask the more interesting question: does any outlet treat any specific topic unusually, even if it doesn’t differ on average? That’s where editorial fingerprints actually live, and we’ll come back to it.</p>
+<p>I fit the model in <code>brms</code> with weakly informative priors and 8 chains by 2000 iterations. All R-hat values came in below 1.01. Diagnostics are in the appendix.</p>
+<p>The first thing the model tells us is the variance budget, namely how much of headline-level sentiment variation lives at each level:</p>
+<div class="cell" data-layout-align="center">
+<div class="cell-output-display">
+<div class="quarto-figure quarto-figure-center">
+<figure class="figure">
+<p><img src="https://jbogomolovas2.github.io/Julius-s-Blog/posts/sentiment_analysis/index_files/figure-html/variance_components-1.png" class="img-fluid quarto-figure quarto-figure-center figure-img" width="960"></p>
+</figure>
+</div>
+</div>
+</div>
+<p>Topic-level variation is roughly 12 times outlet-level variation. The story is overwhelmingly: <em>what</em> a headline is about determines <em>how</em> it reads, far more than <em>who</em> wrote it.</p>
+</section>
+<section id="topic-effects-the-dominant-signal" class="level1 unnumbered">
+<h1 class="unnumbered">Topic effects, the dominant signal</h1>
+<p>Here’s how each topic shifts sentiment, regardless of outlet. Crime and disaster anchor the negative end across the board; sport and culture anchor the positive end:</p>
+<div class="cell" data-layout-align="center">
+<div class="cell-output-display">
+<div class="quarto-figure quarto-figure-center">
+<figure class="figure">
+<p><img src="https://jbogomolovas2.github.io/Julius-s-Blog/posts/sentiment_analysis/index_files/figure-html/plot3_topics-1.png" class="img-fluid quarto-figure quarto-figure-center figure-img" width="960"></p>
+</figure>
+</div>
+</div>
+</div>
+<p>The pattern matches intuition: arts, lifestyle, sport, and science cluster at the top. These are stories of achievement, performance, and discovery. Crime and disaster anchor the bottom, with conflict close behind. Politics sits in mildly negative territory, while weather, economy, and health hover near zero, where the framing depends almost entirely on the specific event.</p>
+<p>The range is what matters most. Topic effects span more than 5 log-odds top to bottom, a huge range, meaning a sport headline is many times more likely to land in the upper sentiment categories than a crime headline, regardless of who wrote it. Outlet effects, as we’ll see next, span barely a tenth of that.</p>
+</section>
+<section id="outlet-effects-whats-left-after-topic" class="level1 unnumbered">
+<h1 class="unnumbered">Outlet effects, what’s left after topic</h1>
+<p>Once the model accounts for topic mix, the gap between outlets nearly disappears:</p>
+<div class="cell" data-layout-align="center">
+<div class="cell-output-display">
+<div class="quarto-figure quarto-figure-center">
+<figure class="figure">
+<p><img src="https://jbogomolovas2.github.io/Julius-s-Blog/posts/sentiment_analysis/index_files/figure-html/plot4_outlets-1.png" class="img-fluid quarto-figure quarto-figure-center figure-img" width="960"></p>
+</figure>
+</div>
+</div>
+</div>
+<p>These are the same outlets that looked dramatically different in the naive chart. After the model accounts for what each one covers, they’re nearly indistinguishable. Lrytas and 15min lean slightly negative; LRT and Verslo žinios lean slightly positive; the credible intervals overlap heavily and most include zero.</p>
+<p>Notice also that the order has shifted from the naive chart. Vakaru ekspresas was at the top of the raw ranking on the strength of just 133 headlines; partial pooling now pulls that small-sample estimate toward the population mean, and Verslo žinios takes the top spot. The differences remain small either way.</p>
+<p>The naive ranking didn’t lie about the numbers. It lied about what those numbers meant.</p>
+</section>
+<section id="where-outlets-actually-differ" class="level1 unnumbered">
+<h1 class="unnumbered">Where outlets actually differ</h1>
+<p>But “outlets are similar on average” doesn’t mean “outlets are interchangeable.” The interaction term, <em>does this outlet cover this specific topic differently from how that topic is treated on average?</em>, is where editorial fingerprints actually live.</p>
+<div class="cell" data-layout-align="center">
+<div class="cell-output-display">
+<div class="quarto-figure quarto-figure-center">
+<figure class="figure">
+<p><img src="https://jbogomolovas2.github.io/Julius-s-Blog/posts/sentiment_analysis/index_files/figure-html/plot5_interactions-1.png" class="img-fluid quarto-figure quarto-figure-center figure-img" width="960"></p>
+</figure>
+</div>
+</div>
+</div>
+<p>These are the cells that survive the strictest filter, namely combinations where we are 95% confident the effect is nonzero. They’re not the only differences between outlets, just the ones we can be confident about given the data we have.</p>
+<p>On the positive side: LRT covers human interest and sport more positively than other outlets do, and 15min covers health more positively than the cross-outlet average for health. On the negative side: Lrytas covers disaster more negatively, LRT covers conflict more negatively, and Delfi covers sport more negatively than the cross-outlet baseline. The Delfi sport finding is notable because sport runs positive everywhere else.</p>
+<p>The story isn’t “this outlet is negative.” The story is “this outlet covers <em>this thing</em> unusually.”</p>
+</section>
+<section id="what-i-can-and-cant-say" class="level1 unnumbered">
+<h1 class="unnumbered">What I can and can’t say</h1>
+<p>This analysis supports:</p>
+<ul>
+<li>Lithuanian news headlines on average sit slightly below sentiment-neutral.</li>
+<li>Topic is by far the strongest determinant of headline sentiment, about an order of magnitude larger than the outlet effect.</li>
+<li>After controlling for topic mix, outlets are far more similar in tone than the raw chart suggests.</li>
+<li>Editorial differences between outlets exist, but live mostly in <em>which topics they cover unusually</em>, not in average tone.</li>
+<li>Crime, conflict, and disaster anchor the negative end across all outlets; sport and culture anchor the positive end.</li>
+</ul>
+<p>This analysis does <strong>not</strong> support:</p>
+<ul>
+<li>Causal claims about why outlets cover what they do.</li>
+<li>Claims about <em>framing</em> in any deep sense. Sentiment of a headline is not the same as bias of a story.</li>
+<li>Generalisation beyond the specific RSS feeds I sampled.</li>
+<li>Anything about audience response. Sentiment of headlines is not sentiment of readers.</li>
+</ul>
+</section>
+<section id="methodology" class="level1 unnumbered">
+<h1 class="unnumbered">Methodology</h1>
+<p>4,832 headlines from 7 Lithuanian outlets (15min, Bernardinai, Delfi, LRT, Lrytas, Vakaru ekspresas, Verslo zinios) over 9 days. Sentiment scores live on 21 discrete rungs from -1.0 to +1.0 in steps of 0.1, assigned by Claude Sonnet 4.6. Topic labels come from the IPTC Media Topics taxonomy (17 top-level categories). The statistical model is a cumulative ordinal Bayesian regression with random intercepts for source, topic, and source by topic, fit with <code>brms</code> using 8 chains by 2000 iterations (1000 warmup). Priors: <code>normal(0, 5)</code> for thresholds, <code>normal(0, 1)</code> for random-effect SDs. All R-hat values were below 1.01 and effective sample sizes above 1500 across parameters of interest. Pipeline and code are open source.</p>
+</section>
+<section id="software-and-packages" class="level1 unnumbered">
+<h1 class="unnumbered">Software and packages</h1>
+<div class="cell" data-layout-align="center">
+<p>We used R v. 4.5.2 <span class="citation" data-cites="base">(R Core Team 2025)</span> and the following R packages: brms v. 2.23.0 <span class="citation" data-cites="brms2017 brms2018 brms2021">(Bürkner 2017, 2018, 2021)</span>, grateful v. 0.3.0 <span class="citation" data-cites="grateful">(Rodriguez-Sanchez and Jackson 2025)</span>, patchwork v. 1.3.2 <span class="citation" data-cites="patchwork">(Pedersen 2025)</span>, scales v. 1.4.0 <span class="citation" data-cites="scales">(Wickham, Pedersen, and Seidel 2025)</span>, tidybayes v. 3.0.7 <span class="citation" data-cites="tidybayes">(Kay 2024)</span>, tidyverse v. 2.0.0 <span class="citation" data-cites="tidyverse">(Wickham et al. 2019)</span>.</p>
+</div>
+</section>
+<section id="appendix-model-diagnostics" class="level1 unnumbered">
+<h1 class="unnumbered">Appendix: model diagnostics</h1>
+<div class="cell" data-layout-align="center">
+<div class="cell-output-display">
+<div class="quarto-figure quarto-figure-center">
+<figure class="figure">
+<p><img src="https://jbogomolovas2.github.io/Julius-s-Blog/posts/sentiment_analysis/index_files/figure-html/diagnostics_pp-1.png" class="img-fluid quarto-figure quarto-figure-center figure-img" width="960"></p>
+</figure>
+</div>
+</div>
+</div>
+<p>If the simulated intervals cover the observed bars, the model is generating data that looks like the data we have.</p>
+<div class="cell" data-layout-align="center">
+<div class="cell-output-display">
+<table class="caption-top table table-sm table-striped small">
+<caption>Variance components: posterior summaries</caption>
+<colgroup>
+<col style="width: 37%">
+<col style="width: 12%">
+<col style="width: 13%">
+<col style="width: 18%">
+<col style="width: 18%">
+</colgroup>
+<thead>
+<tr class="header">
+<th style="text-align: left;">Parameter</th>
+<th style="text-align: right;">Estimate</th>
+<th style="text-align: right;">Est.Error</th>
+<th style="text-align: right;">95% CI lower</th>
+<th style="text-align: right;">95% CI upper</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td style="text-align: left;">sd_source__Intercept</td>
+<td style="text-align: right;">0.120</td>
+<td style="text-align: right;">0.098</td>
+<td style="text-align: right;">0.005</td>
+<td style="text-align: right;">0.362</td>
+</tr>
+<tr class="even">
+<td style="text-align: left;">sd_topic__Intercept</td>
+<td style="text-align: right;">1.412</td>
+<td style="text-align: right;">0.245</td>
+<td style="text-align: right;">1.019</td>
+<td style="text-align: right;">1.969</td>
+</tr>
+<tr class="odd">
+<td style="text-align: left;">sd_source:topic__Intercept</td>
+<td style="text-align: right;">0.423</td>
+<td style="text-align: right;">0.061</td>
+<td style="text-align: right;">0.314</td>
+<td style="text-align: right;">0.554</td>
+</tr>
+</tbody>
+</table>
+</div>
+</div>
+<hr>
+
+
+
+</section>
+
+<div id="quarto-appendix" class="default"><section class="quarto-appendix-contents" id="quarto-bibliography"><h2 class="anchored quarto-appendix-heading">References</h2><div id="refs" class="references csl-bib-body hanging-indent" data-entry-spacing="0">
+<div id="ref-brms2017" class="csl-entry">
+Bürkner, Paul-Christian. 2017. <span>“<span class="nocase">brms</span>: An <span>R</span> Package for <span>Bayesian</span> Multilevel Models Using <span>Stan</span>.”</span> <em>Journal of Statistical Software</em> 80 (1): 1–28. <a href="https://doi.org/10.18637/jss.v080.i01">https://doi.org/10.18637/jss.v080.i01</a>.
+</div>
+<div id="ref-brms2018" class="csl-entry">
+———. 2018. <span>“Advanced <span>Bayesian</span> Multilevel Modeling with the <span>R</span> Package <span class="nocase">brms</span>.”</span> <em>The R Journal</em> 10 (1): 395–411. <a href="https://doi.org/10.32614/RJ-2018-017">https://doi.org/10.32614/RJ-2018-017</a>.
+</div>
+<div id="ref-brms2021" class="csl-entry">
+———. 2021. <span>“Bayesian Item Response Modeling in <span>R</span> with <span class="nocase">brms</span> and <span>Stan</span>.”</span> <em>Journal of Statistical Software</em> 100 (5): 1–54. <a href="https://doi.org/10.18637/jss.v100.i05">https://doi.org/10.18637/jss.v100.i05</a>.
+</div>
+<div id="ref-tidybayes" class="csl-entry">
+Kay, Matthew. 2024. <em><span class="nocase">tidybayes</span>: Tidy Data and Geoms for <span>Bayesian</span> Models</em>. <a href="https://doi.org/10.5281/zenodo.1308151">https://doi.org/10.5281/zenodo.1308151</a>.
+</div>
+<div id="ref-patchwork" class="csl-entry">
+Pedersen, Thomas Lin. 2025. <em><span class="nocase">patchwork</span>: The Composer of Plots</em>. <a href="https://doi.org/10.32614/CRAN.package.patchwork">https://doi.org/10.32614/CRAN.package.patchwork</a>.
+</div>
+<div id="ref-base" class="csl-entry">
+R Core Team. 2025. <em><span>R</span>: A Language and Environment for Statistical Computing</em>. Vienna, Austria: R Foundation for Statistical Computing. <a href="https://www.R-project.org/">https://www.R-project.org/</a>.
+</div>
+<div id="ref-grateful" class="csl-entry">
+Rodriguez-Sanchez, Francisco, and Connor P. Jackson. 2025. <em><span class="nocase">grateful</span>: Facilitate Citation of <span>R</span> Packages</em>. <a href="https://pakillo.github.io/grateful/">https://pakillo.github.io/grateful/</a>.
+</div>
+<div id="ref-tidyverse" class="csl-entry">
+Wickham, Hadley, Mara Averick, Jennifer Bryan, Winston Chang, Lucy D’Agostino McGowan, Romain François, Garrett Grolemund, et al. 2019. <span>“Welcome to the <span class="nocase">tidyverse</span>.”</span> <em>Journal of Open Source Software</em> 4 (43): 1686. <a href="https://doi.org/10.21105/joss.01686">https://doi.org/10.21105/joss.01686</a>.
+</div>
+<div id="ref-scales" class="csl-entry">
+Wickham, Hadley, Thomas Lin Pedersen, and Dana Seidel. 2025. <em><span class="nocase">scales</span>: Scale Functions for Visualization</em>. <a href="https://doi.org/10.32614/CRAN.package.scales">https://doi.org/10.32614/CRAN.package.scales</a>.
+</div>
+</div></section></div> ]]></description>
+  <category>R</category>
+  <category>Bayesian</category>
+  <category>brms</category>
+  <category>Ordinal Regression</category>
+  <category>NLP</category>
+  <category>LLM</category>
+  <category>Lithuanian</category>
+  <category>Media Analysis</category>
+  <guid>https://jbogomolovas2.github.io/Julius-s-Blog/posts/sentiment_analysis/</guid>
+  <pubDate>Sat, 02 May 2026 07:00:00 GMT</pubDate>
+  <media:content url="https://jbogomolovas2.github.io/Julius-s-Blog/posts/sentiment_analysis/thermo.png" medium="image" type="image/png" height="81" width="144"/>
+</item>
 <item>
   <title>Six Years of Daily Steps: When Did Things Actually Change?</title>
   <dc:creator>Julius Bogomolovas</dc:creator>

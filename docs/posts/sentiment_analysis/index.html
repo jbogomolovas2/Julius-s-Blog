@@ -1,0 +1,898 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml" lang="en" xml:lang="en"><head>
+
+<meta charset="utf-8">
+<meta name="generator" content="quarto-1.7.32">
+
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes">
+
+<meta name="author" content="Julius Bogomolovas">
+<meta name="dcterms.date" content="2026-05-02">
+
+<title>“And I’m looking for the funnies”: sentiment in Lithuanian news headlines – Julius's Blog</title>
+<style>
+code{white-space: pre-wrap;}
+span.smallcaps{font-variant: small-caps;}
+div.columns{display: flex; gap: min(4vw, 1.5em);}
+div.column{flex: auto; overflow-x: auto;}
+div.hanging-indent{margin-left: 1.5em; text-indent: -1.5em;}
+ul.task-list{list-style: none;}
+ul.task-list li input[type="checkbox"] {
+  width: 0.8em;
+  margin: 0 0.8em 0.2em -1em; /* quarto-specific, see https://github.com/quarto-dev/quarto-cli/issues/4556 */ 
+  vertical-align: middle;
+}
+/* CSS for citations */
+div.csl-bib-body { }
+div.csl-entry {
+  clear: both;
+  margin-bottom: 0em;
+}
+.hanging-indent div.csl-entry {
+  margin-left:2em;
+  text-indent:-2em;
+}
+div.csl-left-margin {
+  min-width:2em;
+  float:left;
+}
+div.csl-right-inline {
+  margin-left:2em;
+  padding-left:1em;
+}
+div.csl-indent {
+  margin-left: 2em;
+}</style>
+
+
+<script src="../../site_libs/quarto-nav/quarto-nav.js"></script>
+<script src="../../site_libs/quarto-nav/headroom.min.js"></script>
+<script src="../../site_libs/clipboard/clipboard.min.js"></script>
+<script src="../../site_libs/quarto-search/autocomplete.umd.js"></script>
+<script src="../../site_libs/quarto-search/fuse.min.js"></script>
+<script src="../../site_libs/quarto-search/quarto-search.js"></script>
+<meta name="quarto:offset" content="../../">
+<link href="../../profile.jpg" rel="icon" type="image/jpeg">
+<script src="../../site_libs/quarto-html/quarto.js" type="module"></script>
+<script src="../../site_libs/quarto-html/tabsets/tabsets.js" type="module"></script>
+<script src="../../site_libs/quarto-html/popper.min.js"></script>
+<script src="../../site_libs/quarto-html/tippy.umd.min.js"></script>
+<script src="../../site_libs/quarto-html/anchor.min.js"></script>
+<link href="../../site_libs/quarto-html/tippy.css" rel="stylesheet">
+<link href="../../site_libs/quarto-html/quarto-syntax-highlighting-37eea08aefeeee20ff55810ff984fec1.css" rel="stylesheet" id="quarto-text-highlighting-styles">
+<script src="../../site_libs/bootstrap/bootstrap.min.js"></script>
+<link href="../../site_libs/bootstrap/bootstrap-icons.css" rel="stylesheet">
+<link href="../../site_libs/bootstrap/bootstrap-c1fac2584b48ed01fb6e278e36375074.min.css" rel="stylesheet" append-hash="true" id="quarto-bootstrap" data-mode="light">
+<script id="quarto-search-options" type="application/json">{
+  "location": "navbar",
+  "copy-button": false,
+  "collapse-after": 3,
+  "panel-placement": "end",
+  "type": "overlay",
+  "limit": 50,
+  "keyboard-shortcut": [
+    "f",
+    "/",
+    "s"
+  ],
+  "show-item-context": false,
+  "language": {
+    "search-no-results-text": "No results",
+    "search-matching-documents-text": "matching documents",
+    "search-copy-link-title": "Copy link to search",
+    "search-hide-matches-text": "Hide additional matches",
+    "search-more-match-text": "more match in this document",
+    "search-more-matches-text": "more matches in this document",
+    "search-clear-button-title": "Clear",
+    "search-text-placeholder": "",
+    "search-detached-cancel-button-title": "Cancel",
+    "search-submit-button-title": "Submit",
+    "search-label": "Search"
+  }
+}</script>
+
+
+<link rel="stylesheet" href="../../styles.css">
+<meta property="og:title" content="“And I’m looking for the funnies”: sentiment in Lithuanian news headlines – Julius’s Blog">
+<meta property="og:description" content="Data Science, Swimming Analytics, and R Programming">
+<meta property="og:image" content="https://jbogomolovas2.github.io/Julius-s-Blog/posts/sentiment_analysis/thermo.png">
+<meta property="og:site_name" content="Julius's Blog">
+<meta property="og:image:height" content="941">
+<meta property="og:image:width" content="1672">
+<meta name="twitter:title" content="“And I’m looking for the funnies”: sentiment in Lithuanian news headlines – Julius’s Blog">
+<meta name="twitter:description" content="Data Science, Swimming Analytics, and R Programming">
+<meta name="twitter:image" content="https://jbogomolovas2.github.io/Julius-s-Blog/posts/sentiment_analysis/thermo.png">
+<meta name="twitter:image-height" content="941">
+<meta name="twitter:image-width" content="1672">
+<meta name="twitter:card" content="summary_large_image">
+</head>
+
+<body class="nav-fixed quarto-light">
+
+<div id="quarto-search-results"></div>
+  <header id="quarto-header" class="headroom fixed-top quarto-banner">
+    <nav class="navbar navbar-expand-lg " data-bs-theme="dark">
+      <div class="navbar-container container-fluid">
+      <div class="navbar-brand-container mx-auto">
+    <a class="navbar-brand" href="../../index.html">
+    <span class="navbar-title">Julius’s Blog</span>
+    </a>
+  </div>
+            <div id="quarto-search" class="" title="Search"></div>
+          <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbarCollapse" aria-controls="navbarCollapse" role="menu" aria-expanded="false" aria-label="Toggle navigation" onclick="if (window.quartoToggleHeadroom) { window.quartoToggleHeadroom(); }">
+  <span class="navbar-toggler-icon"></span>
+</button>
+          <div class="collapse navbar-collapse" id="navbarCollapse">
+            <ul class="navbar-nav navbar-nav-scroll ms-auto">
+  <li class="nav-item compact">
+    <a class="nav-link" href="../../index.xml"> <i class="bi bi-rss" role="img">
+</i> 
+<span class="menu-text"></span></a>
+  </li>  
+  <li class="nav-item">
+    <a class="nav-link" href="../../about.html"> 
+<span class="menu-text">About</span></a>
+  </li>  
+  <li class="nav-item">
+    <a class="nav-link" href="https://www.r-bloggers.com"> 
+<span class="menu-text">R-bloggers</span></a>
+  </li>  
+  <li class="nav-item compact">
+    <a class="nav-link" href="https://github.com/jbogomolovas2"> <i class="bi bi-github" role="img">
+</i> 
+<span class="menu-text"></span></a>
+  </li>  
+  <li class="nav-item compact">
+    <a class="nav-link" href="https://twitter.com/JuliusBogo1"> <i class="bi bi-twitter" role="img">
+</i> 
+<span class="menu-text"></span></a>
+  </li>  
+  <li class="nav-item compact">
+    <a class="nav-link" href="https://www.linkedin.com/in/julius-bogomolovas-93222a19/"> <i class="bi bi-linkedin" role="img">
+</i> 
+<span class="menu-text"></span></a>
+  </li>  
+</ul>
+          </div> <!-- /navcollapse -->
+            <div class="quarto-navbar-tools">
+</div>
+      </div> <!-- /container-fluid -->
+    </nav>
+</header>
+<!-- content -->
+<header id="title-block-header" class="quarto-title-block default page-columns page-full">
+  <div class="quarto-title-banner page-columns page-full">
+    <div class="quarto-title column-body">
+      <h1 class="title">“And I’m looking for the funnies”: sentiment in Lithuanian news headlines</h1>
+                                <div class="quarto-categories">
+                <div class="quarto-category">R</div>
+                <div class="quarto-category">Bayesian</div>
+                <div class="quarto-category">brms</div>
+                <div class="quarto-category">Ordinal Regression</div>
+                <div class="quarto-category">NLP</div>
+                <div class="quarto-category">LLM</div>
+                <div class="quarto-category">Lithuanian</div>
+                <div class="quarto-category">Media Analysis</div>
+              </div>
+                  </div>
+  </div>
+    
+  
+  <div class="quarto-title-meta">
+
+      <div>
+      <div class="quarto-title-meta-heading">Author</div>
+      <div class="quarto-title-meta-contents">
+               <p>Julius Bogomolovas </p>
+            </div>
+    </div>
+      
+      <div>
+      <div class="quarto-title-meta-heading">Published</div>
+      <div class="quarto-title-meta-contents">
+        <p class="date">May 2, 2026</p>
+      </div>
+    </div>
+    
+      
+    </div>
+    
+  
+  </header><div id="quarto-content" class="quarto-container page-columns page-rows-contents page-layout-article page-navbar">
+<!-- sidebar -->
+<!-- margin-sidebar -->
+    <div id="quarto-margin-sidebar" class="sidebar margin-sidebar">
+        <nav id="TOC" role="doc-toc" class="toc-active">
+    <h2 id="toc-title">On this page</h2>
+   
+  <ul>
+  <li><a href="#the-first-wrong-finding" id="toc-the-first-wrong-finding" class="nav-link active" data-scroll-target="#the-first-wrong-finding">The first (wrong) finding</a></li>
+  <li><a href="#what-i-missed" id="toc-what-i-missed" class="nav-link" data-scroll-target="#what-i-missed">What I missed</a></li>
+  <li><a href="#what-the-model-says" id="toc-what-the-model-says" class="nav-link" data-scroll-target="#what-the-model-says">What the model says</a></li>
+  <li><a href="#topic-effects-the-dominant-signal" id="toc-topic-effects-the-dominant-signal" class="nav-link" data-scroll-target="#topic-effects-the-dominant-signal">Topic effects, the dominant signal</a></li>
+  <li><a href="#outlet-effects-whats-left-after-topic" id="toc-outlet-effects-whats-left-after-topic" class="nav-link" data-scroll-target="#outlet-effects-whats-left-after-topic">Outlet effects, what’s left after topic</a></li>
+  <li><a href="#where-outlets-actually-differ" id="toc-where-outlets-actually-differ" class="nav-link" data-scroll-target="#where-outlets-actually-differ">Where outlets actually differ</a></li>
+  <li><a href="#what-i-can-and-cant-say" id="toc-what-i-can-and-cant-say" class="nav-link" data-scroll-target="#what-i-can-and-cant-say">What I can and can’t say</a></li>
+  <li><a href="#methodology" id="toc-methodology" class="nav-link" data-scroll-target="#methodology">Methodology</a></li>
+  <li><a href="#software-and-packages" id="toc-software-and-packages" class="nav-link" data-scroll-target="#software-and-packages">Software and packages</a></li>
+  <li><a href="#appendix-model-diagnostics" id="toc-appendix-model-diagnostics" class="nav-link" data-scroll-target="#appendix-model-diagnostics">Appendix: model diagnostics</a></li>
+  </ul>
+</nav>
+    </div>
+<!-- main -->
+<main class="content quarto-banner-title-block" id="quarto-document-content">
+
+
+
+
+
+<p>There’s a moment in Suzanne Vega’s <em>Tom’s Diner</em> where the narrator picks up a newspaper, skips the stories, and goes straight to the funnies. It’s a small, accurate observation about reading the news: most of it doesn’t feel good, so you protect yourself.</p>
+<p>I wanted to know how true that is, in numbers. Are Lithuanian news headlines as relentlessly negative as they feel? Are some outlets more negative than others?</p>
+<p>To find out, I built a small system that hourly pulls RSS feeds from 7 Lithuanian outlets, deduplicates by URL, and sends each new headline to Claude Sonnet 4.6. The model returns three things: a sentiment score in [-1, +1], an IPTC Media Topic label (one of 17 international press categories like <em>politics</em>, <em>sport</em>, <em>crime, law and justice</em>), and up to three named entities.</p>
+<p>Two things made this approach attractive. First, Lithuanian is heavily inflected and has limited classical NLP tooling, so a frontier multilingual model handles it cleanly without needing to train anything. Second, using IPTC’s controlled vocabulary instead of letting the model invent topic labels makes per-topic comparisons coherent across outlets. Cost is about $0.001 per headline.</p>
+<p>After a week, I had 4,832 scored headlines spanning 9 days. Here’s the distribution of sentiment scores:</p>
+<p><em>Examples below appear in the original Lithuanian with English translations.</em></p>
+<div class="cell" data-layout-align="center">
+<div class="cell-output-display">
+<div class="quarto-figure quarto-figure-center">
+<figure class="figure">
+<p><img src="index_files/figure-html/plot1_distribution-1.png" class="img-fluid quarto-figure quarto-figure-center figure-img" width="960"></p>
+</figure>
+</div>
+</div>
+</div>
+<p>To make the score concrete, here are real processed headlines from the dataset at three different sentiment levels and topics. Claude does a pretty good job.</p>
+<div class="cell" data-layout-align="center">
+<div class="cell-output-display">
+<table class="caption-top table table-sm table-striped small">
+<caption>Example headlines at three sentiment levels</caption>
+<colgroup>
+<col style="width: 2%">
+<col style="width: 17%">
+<col style="width: 36%">
+<col style="width: 43%">
+</colgroup>
+<thead>
+<tr class="header">
+<th style="text-align: left;">Score</th>
+<th style="text-align: left;">Topic</th>
+<th style="text-align: left;">Lithuanian</th>
+<th style="text-align: left;">English</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td style="text-align: left;">-0.7</td>
+<td style="text-align: left;">disaster, accident and emergency incident</td>
+<td style="text-align: left;">Vilkaviškyje dingo iš ligoninės pasišalinęs nepilnametis</td>
+<td style="text-align: left;">A minor went missing after leaving a hospital in Vilkaviškis</td>
+</tr>
+<tr class="even">
+<td style="text-align: left;">0.0</td>
+<td style="text-align: left;">economy, business and finance</td>
+<td style="text-align: left;">Klausiate, atsakome. Ar antstoliai nuskaitys atgautas antrosios pensijų pakopos lėšas?</td>
+<td style="text-align: left;">Q&amp;A on whether bailiffs will deduct recovered second-pillar pension funds</td>
+</tr>
+<tr class="odd">
+<td style="text-align: left;">+0.7</td>
+<td style="text-align: left;">education</td>
+<td style="text-align: left;">Klaipėdos Vydūno gimnazijos pirmokai Lietuvai atstovaus robotikos čempionate Honkonge</td>
+<td style="text-align: left;">Klaipėda’s Vydūnas Gymnasium first-years will represent Lithuania at a robotics championship in Hong Kong</td>
+</tr>
+</tbody>
+</table>
+</div>
+</div>
+<p>The distribution is clearly bimodal, with two humps separated by a trough at zero. Headlines exist to provoke; pure neutrality is rare. Most lean one way or the other, and few are ambivalent.</p>
+<p>So I went looking for differences between outlets. The chart said <code>15min.lt</code> was the most negative outlet in Lithuania. The chart was wrong. Not because the number was wrong, but because the comparison wasn’t fair. Here’s what went wrong, and what the data actually shows.</p>
+<section id="the-first-wrong-finding" class="level1 unnumbered">
+<h1 class="unnumbered">The first (wrong) finding</h1>
+<p>I plotted mean sentiment per outlet, ranked them, and got this:</p>
+<div class="cell" data-layout-align="center">
+<div class="cell-output-display">
+<div class="quarto-figure quarto-figure-center">
+<figure class="figure">
+<p><img src="index_files/figure-html/plot2_naive-1.png" class="img-fluid quarto-figure quarto-figure-center figure-img" width="960"></p>
+</figure>
+</div>
+</div>
+</div>
+<p>By this measure, 15min sits noticeably below everyone else. If I had published this as the result, it would have looked clean and confident, and it would have been misleading.</p>
+</section>
+<section id="what-i-missed" class="level1 unnumbered">
+<h1 class="unnumbered">What I missed</h1>
+<p>Outlets cover different mixes of topics, and topics carry their own sentiment baseline. Crime headlines are negative everywhere; sport headlines are positive everywhere. So a fair comparison has to account for what each outlet writes about, not just how their headlines score on average.</p>
+</section>
+<section id="what-the-model-says" class="level1 unnumbered">
+<h1 class="unnumbered">What the model says</h1>
+<p>The right tool is <strong>partial pooling with a hierarchical Bayesian model</strong>. The intuition: every headline’s sentiment is a sum of effects, namely what topic it’s about, which outlet wrote it, and whether this particular outlet treats this particular topic differently from average. The model estimates each piece simultaneously and shrinks small-sample estimates toward the population mean. So an outlet with three crime headlines doesn’t get to claim a wildly different “crime tone” from one with three hundred. Its estimate gets pulled toward what we know about crime coverage in general.</p>
+<p>Three modelling choices need a brief defence:</p>
+<p><strong>Why ordinal, not Gaussian?</strong> A linear regression on sentiment treats the score as if it were continuous and normally distributed. It isn’t. The scores live on 21 discrete rungs from -1.0 to +1.0 in steps of 0.1, and the histogram you saw earlier is bimodal, not bell-shaped. Fitting a Gaussian model gives sensible <em>rankings</em> but unreliable uncertainty estimates and ugly posterior predictive checks. Cumulative ordinal regression handles the discrete, bimodal structure natively.</p>
+<p><strong>Why Bayesian, not frequentist?</strong> I fit several frequentist models first as sanity checks (<code>lm</code>, <code>polr</code>, <code>clmm</code>), and they all agreed on the substantive answer. The Bayesian fit adds three things the frequentist alternatives can’t: honest credible intervals on variance components (especially important when the source-level variance is genuinely small and a frequentist point estimate near zero is misleading), proper partial pooling that’s robust to sparse cells in the source by topic interaction, and posterior distributions that visualise uncertainty as shape rather than as a confidence-interval bar.</p>
+<p><strong>Why the source by topic interaction?</strong> Without it, “outlets are similar on average” would be the only thing the model could say. The interaction term is what lets us ask the more interesting question: does any outlet treat any specific topic unusually, even if it doesn’t differ on average? That’s where editorial fingerprints actually live, and we’ll come back to it.</p>
+<p>I fit the model in <code>brms</code> with weakly informative priors and 8 chains by 2000 iterations. All R-hat values came in below 1.01. Diagnostics are in the appendix.</p>
+<p>The first thing the model tells us is the variance budget, namely how much of headline-level sentiment variation lives at each level:</p>
+<div class="cell" data-layout-align="center">
+<div class="cell-output-display">
+<div class="quarto-figure quarto-figure-center">
+<figure class="figure">
+<p><img src="index_files/figure-html/variance_components-1.png" class="img-fluid quarto-figure quarto-figure-center figure-img" width="960"></p>
+</figure>
+</div>
+</div>
+</div>
+<p>Topic-level variation is roughly 12 times outlet-level variation. The story is overwhelmingly: <em>what</em> a headline is about determines <em>how</em> it reads, far more than <em>who</em> wrote it.</p>
+</section>
+<section id="topic-effects-the-dominant-signal" class="level1 unnumbered">
+<h1 class="unnumbered">Topic effects, the dominant signal</h1>
+<p>Here’s how each topic shifts sentiment, regardless of outlet. Crime and disaster anchor the negative end across the board; sport and culture anchor the positive end:</p>
+<div class="cell" data-layout-align="center">
+<div class="cell-output-display">
+<div class="quarto-figure quarto-figure-center">
+<figure class="figure">
+<p><img src="index_files/figure-html/plot3_topics-1.png" class="img-fluid quarto-figure quarto-figure-center figure-img" width="960"></p>
+</figure>
+</div>
+</div>
+</div>
+<p>The pattern matches intuition: arts, lifestyle, sport, and science cluster at the top. These are stories of achievement, performance, and discovery. Crime and disaster anchor the bottom, with conflict close behind. Politics sits in mildly negative territory, while weather, economy, and health hover near zero, where the framing depends almost entirely on the specific event.</p>
+<p>The range is what matters most. Topic effects span more than 5 log-odds top to bottom, a huge range, meaning a sport headline is many times more likely to land in the upper sentiment categories than a crime headline, regardless of who wrote it. Outlet effects, as we’ll see next, span barely a tenth of that.</p>
+</section>
+<section id="outlet-effects-whats-left-after-topic" class="level1 unnumbered">
+<h1 class="unnumbered">Outlet effects, what’s left after topic</h1>
+<p>Once the model accounts for topic mix, the gap between outlets nearly disappears:</p>
+<div class="cell" data-layout-align="center">
+<div class="cell-output-display">
+<div class="quarto-figure quarto-figure-center">
+<figure class="figure">
+<p><img src="index_files/figure-html/plot4_outlets-1.png" class="img-fluid quarto-figure quarto-figure-center figure-img" width="960"></p>
+</figure>
+</div>
+</div>
+</div>
+<p>These are the same outlets that looked dramatically different in the naive chart. After the model accounts for what each one covers, they’re nearly indistinguishable. Lrytas and 15min lean slightly negative; LRT and Verslo žinios lean slightly positive; the credible intervals overlap heavily and most include zero.</p>
+<p>Notice also that the order has shifted from the naive chart. Vakaru ekspresas was at the top of the raw ranking on the strength of just 133 headlines; partial pooling now pulls that small-sample estimate toward the population mean, and Verslo žinios takes the top spot. The differences remain small either way.</p>
+<p>The naive ranking didn’t lie about the numbers. It lied about what those numbers meant.</p>
+</section>
+<section id="where-outlets-actually-differ" class="level1 unnumbered">
+<h1 class="unnumbered">Where outlets actually differ</h1>
+<p>But “outlets are similar on average” doesn’t mean “outlets are interchangeable.” The interaction term, <em>does this outlet cover this specific topic differently from how that topic is treated on average?</em>, is where editorial fingerprints actually live.</p>
+<div class="cell" data-layout-align="center">
+<div class="cell-output-display">
+<div class="quarto-figure quarto-figure-center">
+<figure class="figure">
+<p><img src="index_files/figure-html/plot5_interactions-1.png" class="img-fluid quarto-figure quarto-figure-center figure-img" width="960"></p>
+</figure>
+</div>
+</div>
+</div>
+<p>These are the cells that survive the strictest filter, namely combinations where we are 95% confident the effect is nonzero. They’re not the only differences between outlets, just the ones we can be confident about given the data we have.</p>
+<p>On the positive side: LRT covers human interest and sport more positively than other outlets do, and 15min covers health more positively than the cross-outlet average for health. On the negative side: Lrytas covers disaster more negatively, LRT covers conflict more negatively, and Delfi covers sport more negatively than the cross-outlet baseline. The Delfi sport finding is notable because sport runs positive everywhere else.</p>
+<p>The story isn’t “this outlet is negative.” The story is “this outlet covers <em>this thing</em> unusually.”</p>
+</section>
+<section id="what-i-can-and-cant-say" class="level1 unnumbered">
+<h1 class="unnumbered">What I can and can’t say</h1>
+<p>This analysis supports:</p>
+<ul>
+<li>Lithuanian news headlines on average sit slightly below sentiment-neutral.</li>
+<li>Topic is by far the strongest determinant of headline sentiment, about an order of magnitude larger than the outlet effect.</li>
+<li>After controlling for topic mix, outlets are far more similar in tone than the raw chart suggests.</li>
+<li>Editorial differences between outlets exist, but live mostly in <em>which topics they cover unusually</em>, not in average tone.</li>
+<li>Crime, conflict, and disaster anchor the negative end across all outlets; sport and culture anchor the positive end.</li>
+</ul>
+<p>This analysis does <strong>not</strong> support:</p>
+<ul>
+<li>Causal claims about why outlets cover what they do.</li>
+<li>Claims about <em>framing</em> in any deep sense. Sentiment of a headline is not the same as bias of a story.</li>
+<li>Generalisation beyond the specific RSS feeds I sampled.</li>
+<li>Anything about audience response. Sentiment of headlines is not sentiment of readers.</li>
+</ul>
+</section>
+<section id="methodology" class="level1 unnumbered">
+<h1 class="unnumbered">Methodology</h1>
+<p>4,832 headlines from 7 Lithuanian outlets (15min, Bernardinai, Delfi, LRT, Lrytas, Vakaru ekspresas, Verslo zinios) over 9 days. Sentiment scores live on 21 discrete rungs from -1.0 to +1.0 in steps of 0.1, assigned by Claude Sonnet 4.6. Topic labels come from the IPTC Media Topics taxonomy (17 top-level categories). The statistical model is a cumulative ordinal Bayesian regression with random intercepts for source, topic, and source by topic, fit with <code>brms</code> using 8 chains by 2000 iterations (1000 warmup). Priors: <code>normal(0, 5)</code> for thresholds, <code>normal(0, 1)</code> for random-effect SDs. All R-hat values were below 1.01 and effective sample sizes above 1500 across parameters of interest. Pipeline and code are open source.</p>
+</section>
+<section id="software-and-packages" class="level1 unnumbered">
+<h1 class="unnumbered">Software and packages</h1>
+<div class="cell" data-layout-align="center">
+<p>We used R v. 4.5.2 <span class="citation" data-cites="base">(<a href="#ref-base" role="doc-biblioref">R Core Team 2025</a>)</span> and the following R packages: brms v. 2.23.0 <span class="citation" data-cites="brms2017 brms2018 brms2021">(<a href="#ref-brms2017" role="doc-biblioref">Bürkner 2017</a>, <a href="#ref-brms2018" role="doc-biblioref">2018</a>, <a href="#ref-brms2021" role="doc-biblioref">2021</a>)</span>, grateful v. 0.3.0 <span class="citation" data-cites="grateful">(<a href="#ref-grateful" role="doc-biblioref">Rodriguez-Sanchez and Jackson 2025</a>)</span>, patchwork v. 1.3.2 <span class="citation" data-cites="patchwork">(<a href="#ref-patchwork" role="doc-biblioref">Pedersen 2025</a>)</span>, scales v. 1.4.0 <span class="citation" data-cites="scales">(<a href="#ref-scales" role="doc-biblioref">Wickham, Pedersen, and Seidel 2025</a>)</span>, tidybayes v. 3.0.7 <span class="citation" data-cites="tidybayes">(<a href="#ref-tidybayes" role="doc-biblioref">Kay 2024</a>)</span>, tidyverse v. 2.0.0 <span class="citation" data-cites="tidyverse">(<a href="#ref-tidyverse" role="doc-biblioref">Wickham et al. 2019</a>)</span>.</p>
+</div>
+</section>
+<section id="appendix-model-diagnostics" class="level1 unnumbered">
+<h1 class="unnumbered">Appendix: model diagnostics</h1>
+<div class="cell" data-layout-align="center">
+<div class="cell-output-display">
+<div class="quarto-figure quarto-figure-center">
+<figure class="figure">
+<p><img src="index_files/figure-html/diagnostics_pp-1.png" class="img-fluid quarto-figure quarto-figure-center figure-img" width="960"></p>
+</figure>
+</div>
+</div>
+</div>
+<p>If the simulated intervals cover the observed bars, the model is generating data that looks like the data we have.</p>
+<div class="cell" data-layout-align="center">
+<div class="cell-output-display">
+<table class="caption-top table table-sm table-striped small">
+<caption>Variance components: posterior summaries</caption>
+<colgroup>
+<col style="width: 37%">
+<col style="width: 12%">
+<col style="width: 13%">
+<col style="width: 18%">
+<col style="width: 18%">
+</colgroup>
+<thead>
+<tr class="header">
+<th style="text-align: left;">Parameter</th>
+<th style="text-align: right;">Estimate</th>
+<th style="text-align: right;">Est.Error</th>
+<th style="text-align: right;">95% CI lower</th>
+<th style="text-align: right;">95% CI upper</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td style="text-align: left;">sd_source__Intercept</td>
+<td style="text-align: right;">0.120</td>
+<td style="text-align: right;">0.098</td>
+<td style="text-align: right;">0.005</td>
+<td style="text-align: right;">0.362</td>
+</tr>
+<tr class="even">
+<td style="text-align: left;">sd_topic__Intercept</td>
+<td style="text-align: right;">1.412</td>
+<td style="text-align: right;">0.245</td>
+<td style="text-align: right;">1.019</td>
+<td style="text-align: right;">1.969</td>
+</tr>
+<tr class="odd">
+<td style="text-align: left;">sd_source:topic__Intercept</td>
+<td style="text-align: right;">0.423</td>
+<td style="text-align: right;">0.061</td>
+<td style="text-align: right;">0.314</td>
+<td style="text-align: right;">0.554</td>
+</tr>
+</tbody>
+</table>
+</div>
+</div>
+<hr>
+
+
+
+</section>
+
+<div id="quarto-appendix" class="default"><section class="quarto-appendix-contents" role="doc-bibliography" id="quarto-bibliography"><h2 class="anchored quarto-appendix-heading">References</h2><div id="refs" class="references csl-bib-body hanging-indent" data-entry-spacing="0" role="list">
+<div id="ref-brms2017" class="csl-entry" role="listitem">
+Bürkner, Paul-Christian. 2017. <span>“<span class="nocase">brms</span>: An <span>R</span> Package for <span>Bayesian</span> Multilevel Models Using <span>Stan</span>.”</span> <em>Journal of Statistical Software</em> 80 (1): 1–28. <a href="https://doi.org/10.18637/jss.v080.i01">https://doi.org/10.18637/jss.v080.i01</a>.
+</div>
+<div id="ref-brms2018" class="csl-entry" role="listitem">
+———. 2018. <span>“Advanced <span>Bayesian</span> Multilevel Modeling with the <span>R</span> Package <span class="nocase">brms</span>.”</span> <em>The R Journal</em> 10 (1): 395–411. <a href="https://doi.org/10.32614/RJ-2018-017">https://doi.org/10.32614/RJ-2018-017</a>.
+</div>
+<div id="ref-brms2021" class="csl-entry" role="listitem">
+———. 2021. <span>“Bayesian Item Response Modeling in <span>R</span> with <span class="nocase">brms</span> and <span>Stan</span>.”</span> <em>Journal of Statistical Software</em> 100 (5): 1–54. <a href="https://doi.org/10.18637/jss.v100.i05">https://doi.org/10.18637/jss.v100.i05</a>.
+</div>
+<div id="ref-tidybayes" class="csl-entry" role="listitem">
+Kay, Matthew. 2024. <em><span class="nocase">tidybayes</span>: Tidy Data and Geoms for <span>Bayesian</span> Models</em>. <a href="https://doi.org/10.5281/zenodo.1308151">https://doi.org/10.5281/zenodo.1308151</a>.
+</div>
+<div id="ref-patchwork" class="csl-entry" role="listitem">
+Pedersen, Thomas Lin. 2025. <em><span class="nocase">patchwork</span>: The Composer of Plots</em>. <a href="https://doi.org/10.32614/CRAN.package.patchwork">https://doi.org/10.32614/CRAN.package.patchwork</a>.
+</div>
+<div id="ref-base" class="csl-entry" role="listitem">
+R Core Team. 2025. <em><span>R</span>: A Language and Environment for Statistical Computing</em>. Vienna, Austria: R Foundation for Statistical Computing. <a href="https://www.R-project.org/">https://www.R-project.org/</a>.
+</div>
+<div id="ref-grateful" class="csl-entry" role="listitem">
+Rodriguez-Sanchez, Francisco, and Connor P. Jackson. 2025. <em><span class="nocase">grateful</span>: Facilitate Citation of <span>R</span> Packages</em>. <a href="https://pakillo.github.io/grateful/">https://pakillo.github.io/grateful/</a>.
+</div>
+<div id="ref-tidyverse" class="csl-entry" role="listitem">
+Wickham, Hadley, Mara Averick, Jennifer Bryan, Winston Chang, Lucy D’Agostino McGowan, Romain François, Garrett Grolemund, et al. 2019. <span>“Welcome to the <span class="nocase">tidyverse</span>.”</span> <em>Journal of Open Source Software</em> 4 (43): 1686. <a href="https://doi.org/10.21105/joss.01686">https://doi.org/10.21105/joss.01686</a>.
+</div>
+<div id="ref-scales" class="csl-entry" role="listitem">
+Wickham, Hadley, Thomas Lin Pedersen, and Dana Seidel. 2025. <em><span class="nocase">scales</span>: Scale Functions for Visualization</em>. <a href="https://doi.org/10.32614/CRAN.package.scales">https://doi.org/10.32614/CRAN.package.scales</a>.
+</div>
+</div></section></div></main> <!-- /main -->
+<script id="quarto-html-after-body" type="application/javascript">
+  window.document.addEventListener("DOMContentLoaded", function (event) {
+    const icon = "";
+    const anchorJS = new window.AnchorJS();
+    anchorJS.options = {
+      placement: 'right',
+      icon: icon
+    };
+    anchorJS.add('.anchored');
+    const isCodeAnnotation = (el) => {
+      for (const clz of el.classList) {
+        if (clz.startsWith('code-annotation-')) {                     
+          return true;
+        }
+      }
+      return false;
+    }
+    const onCopySuccess = function(e) {
+      // button target
+      const button = e.trigger;
+      // don't keep focus
+      button.blur();
+      // flash "checked"
+      button.classList.add('code-copy-button-checked');
+      var currentTitle = button.getAttribute("title");
+      button.setAttribute("title", "Copied!");
+      let tooltip;
+      if (window.bootstrap) {
+        button.setAttribute("data-bs-toggle", "tooltip");
+        button.setAttribute("data-bs-placement", "left");
+        button.setAttribute("data-bs-title", "Copied!");
+        tooltip = new bootstrap.Tooltip(button, 
+          { trigger: "manual", 
+            customClass: "code-copy-button-tooltip",
+            offset: [0, -8]});
+        tooltip.show();    
+      }
+      setTimeout(function() {
+        if (tooltip) {
+          tooltip.hide();
+          button.removeAttribute("data-bs-title");
+          button.removeAttribute("data-bs-toggle");
+          button.removeAttribute("data-bs-placement");
+        }
+        button.setAttribute("title", currentTitle);
+        button.classList.remove('code-copy-button-checked');
+      }, 1000);
+      // clear code selection
+      e.clearSelection();
+    }
+    const getTextToCopy = function(trigger) {
+        const codeEl = trigger.previousElementSibling.cloneNode(true);
+        for (const childEl of codeEl.children) {
+          if (isCodeAnnotation(childEl)) {
+            childEl.remove();
+          }
+        }
+        return codeEl.innerText;
+    }
+    const clipboard = new window.ClipboardJS('.code-copy-button:not([data-in-quarto-modal])', {
+      text: getTextToCopy
+    });
+    clipboard.on('success', onCopySuccess);
+    if (window.document.getElementById('quarto-embedded-source-code-modal')) {
+      const clipboardModal = new window.ClipboardJS('.code-copy-button[data-in-quarto-modal]', {
+        text: getTextToCopy,
+        container: window.document.getElementById('quarto-embedded-source-code-modal')
+      });
+      clipboardModal.on('success', onCopySuccess);
+    }
+      var localhostRegex = new RegExp(/^(?:http|https):\/\/localhost\:?[0-9]*\//);
+      var mailtoRegex = new RegExp(/^mailto:/);
+        var filterRegex = new RegExp("https:\/\/jbogomolovas2\.github\.io\/Julius-s-Blog\/");
+      var isInternal = (href) => {
+          return filterRegex.test(href) || localhostRegex.test(href) || mailtoRegex.test(href);
+      }
+      // Inspect non-navigation links and adorn them if external
+     var links = window.document.querySelectorAll('a[href]:not(.nav-link):not(.navbar-brand):not(.toc-action):not(.sidebar-link):not(.sidebar-item-toggle):not(.pagination-link):not(.no-external):not([aria-hidden]):not(.dropdown-item):not(.quarto-navigation-tool):not(.about-link)');
+      for (var i=0; i<links.length; i++) {
+        const link = links[i];
+        if (!isInternal(link.href)) {
+          // undo the damage that might have been done by quarto-nav.js in the case of
+          // links that we want to consider external
+          if (link.dataset.originalHref !== undefined) {
+            link.href = link.dataset.originalHref;
+          }
+        }
+      }
+    function tippyHover(el, contentFn, onTriggerFn, onUntriggerFn) {
+      const config = {
+        allowHTML: true,
+        maxWidth: 500,
+        delay: 100,
+        arrow: false,
+        appendTo: function(el) {
+            return el.parentElement;
+        },
+        interactive: true,
+        interactiveBorder: 10,
+        theme: 'quarto',
+        placement: 'bottom-start',
+      };
+      if (contentFn) {
+        config.content = contentFn;
+      }
+      if (onTriggerFn) {
+        config.onTrigger = onTriggerFn;
+      }
+      if (onUntriggerFn) {
+        config.onUntrigger = onUntriggerFn;
+      }
+      window.tippy(el, config); 
+    }
+    const noterefs = window.document.querySelectorAll('a[role="doc-noteref"]');
+    for (var i=0; i<noterefs.length; i++) {
+      const ref = noterefs[i];
+      tippyHover(ref, function() {
+        // use id or data attribute instead here
+        let href = ref.getAttribute('data-footnote-href') || ref.getAttribute('href');
+        try { href = new URL(href).hash; } catch {}
+        const id = href.replace(/^#\/?/, "");
+        const note = window.document.getElementById(id);
+        if (note) {
+          return note.innerHTML;
+        } else {
+          return "";
+        }
+      });
+    }
+    const xrefs = window.document.querySelectorAll('a.quarto-xref');
+    const processXRef = (id, note) => {
+      // Strip column container classes
+      const stripColumnClz = (el) => {
+        el.classList.remove("page-full", "page-columns");
+        if (el.children) {
+          for (const child of el.children) {
+            stripColumnClz(child);
+          }
+        }
+      }
+      stripColumnClz(note)
+      if (id === null || id.startsWith('sec-')) {
+        // Special case sections, only their first couple elements
+        const container = document.createElement("div");
+        if (note.children && note.children.length > 2) {
+          container.appendChild(note.children[0].cloneNode(true));
+          for (let i = 1; i < note.children.length; i++) {
+            const child = note.children[i];
+            if (child.tagName === "P" && child.innerText === "") {
+              continue;
+            } else {
+              container.appendChild(child.cloneNode(true));
+              break;
+            }
+          }
+          if (window.Quarto?.typesetMath) {
+            window.Quarto.typesetMath(container);
+          }
+          return container.innerHTML
+        } else {
+          if (window.Quarto?.typesetMath) {
+            window.Quarto.typesetMath(note);
+          }
+          return note.innerHTML;
+        }
+      } else {
+        // Remove any anchor links if they are present
+        const anchorLink = note.querySelector('a.anchorjs-link');
+        if (anchorLink) {
+          anchorLink.remove();
+        }
+        if (window.Quarto?.typesetMath) {
+          window.Quarto.typesetMath(note);
+        }
+        if (note.classList.contains("callout")) {
+          return note.outerHTML;
+        } else {
+          return note.innerHTML;
+        }
+      }
+    }
+    for (var i=0; i<xrefs.length; i++) {
+      const xref = xrefs[i];
+      tippyHover(xref, undefined, function(instance) {
+        instance.disable();
+        let url = xref.getAttribute('href');
+        let hash = undefined; 
+        if (url.startsWith('#')) {
+          hash = url;
+        } else {
+          try { hash = new URL(url).hash; } catch {}
+        }
+        if (hash) {
+          const id = hash.replace(/^#\/?/, "");
+          const note = window.document.getElementById(id);
+          if (note !== null) {
+            try {
+              const html = processXRef(id, note.cloneNode(true));
+              instance.setContent(html);
+            } finally {
+              instance.enable();
+              instance.show();
+            }
+          } else {
+            // See if we can fetch this
+            fetch(url.split('#')[0])
+            .then(res => res.text())
+            .then(html => {
+              const parser = new DOMParser();
+              const htmlDoc = parser.parseFromString(html, "text/html");
+              const note = htmlDoc.getElementById(id);
+              if (note !== null) {
+                const html = processXRef(id, note);
+                instance.setContent(html);
+              } 
+            }).finally(() => {
+              instance.enable();
+              instance.show();
+            });
+          }
+        } else {
+          // See if we can fetch a full url (with no hash to target)
+          // This is a special case and we should probably do some content thinning / targeting
+          fetch(url)
+          .then(res => res.text())
+          .then(html => {
+            const parser = new DOMParser();
+            const htmlDoc = parser.parseFromString(html, "text/html");
+            const note = htmlDoc.querySelector('main.content');
+            if (note !== null) {
+              // This should only happen for chapter cross references
+              // (since there is no id in the URL)
+              // remove the first header
+              if (note.children.length > 0 && note.children[0].tagName === "HEADER") {
+                note.children[0].remove();
+              }
+              const html = processXRef(null, note);
+              instance.setContent(html);
+            } 
+          }).finally(() => {
+            instance.enable();
+            instance.show();
+          });
+        }
+      }, function(instance) {
+      });
+    }
+        let selectedAnnoteEl;
+        const selectorForAnnotation = ( cell, annotation) => {
+          let cellAttr = 'data-code-cell="' + cell + '"';
+          let lineAttr = 'data-code-annotation="' +  annotation + '"';
+          const selector = 'span[' + cellAttr + '][' + lineAttr + ']';
+          return selector;
+        }
+        const selectCodeLines = (annoteEl) => {
+          const doc = window.document;
+          const targetCell = annoteEl.getAttribute("data-target-cell");
+          const targetAnnotation = annoteEl.getAttribute("data-target-annotation");
+          const annoteSpan = window.document.querySelector(selectorForAnnotation(targetCell, targetAnnotation));
+          const lines = annoteSpan.getAttribute("data-code-lines").split(",");
+          const lineIds = lines.map((line) => {
+            return targetCell + "-" + line;
+          })
+          let top = null;
+          let height = null;
+          let parent = null;
+          if (lineIds.length > 0) {
+              //compute the position of the single el (top and bottom and make a div)
+              const el = window.document.getElementById(lineIds[0]);
+              top = el.offsetTop;
+              height = el.offsetHeight;
+              parent = el.parentElement.parentElement;
+            if (lineIds.length > 1) {
+              const lastEl = window.document.getElementById(lineIds[lineIds.length - 1]);
+              const bottom = lastEl.offsetTop + lastEl.offsetHeight;
+              height = bottom - top;
+            }
+            if (top !== null && height !== null && parent !== null) {
+              // cook up a div (if necessary) and position it 
+              let div = window.document.getElementById("code-annotation-line-highlight");
+              if (div === null) {
+                div = window.document.createElement("div");
+                div.setAttribute("id", "code-annotation-line-highlight");
+                div.style.position = 'absolute';
+                parent.appendChild(div);
+              }
+              div.style.top = top - 2 + "px";
+              div.style.height = height + 4 + "px";
+              div.style.left = 0;
+              let gutterDiv = window.document.getElementById("code-annotation-line-highlight-gutter");
+              if (gutterDiv === null) {
+                gutterDiv = window.document.createElement("div");
+                gutterDiv.setAttribute("id", "code-annotation-line-highlight-gutter");
+                gutterDiv.style.position = 'absolute';
+                const codeCell = window.document.getElementById(targetCell);
+                const gutter = codeCell.querySelector('.code-annotation-gutter');
+                gutter.appendChild(gutterDiv);
+              }
+              gutterDiv.style.top = top - 2 + "px";
+              gutterDiv.style.height = height + 4 + "px";
+            }
+            selectedAnnoteEl = annoteEl;
+          }
+        };
+        const unselectCodeLines = () => {
+          const elementsIds = ["code-annotation-line-highlight", "code-annotation-line-highlight-gutter"];
+          elementsIds.forEach((elId) => {
+            const div = window.document.getElementById(elId);
+            if (div) {
+              div.remove();
+            }
+          });
+          selectedAnnoteEl = undefined;
+        };
+          // Handle positioning of the toggle
+      window.addEventListener(
+        "resize",
+        throttle(() => {
+          elRect = undefined;
+          if (selectedAnnoteEl) {
+            selectCodeLines(selectedAnnoteEl);
+          }
+        }, 10)
+      );
+      function throttle(fn, ms) {
+      let throttle = false;
+      let timer;
+        return (...args) => {
+          if(!throttle) { // first call gets through
+              fn.apply(this, args);
+              throttle = true;
+          } else { // all the others get throttled
+              if(timer) clearTimeout(timer); // cancel #2
+              timer = setTimeout(() => {
+                fn.apply(this, args);
+                timer = throttle = false;
+              }, ms);
+          }
+        };
+      }
+        // Attach click handler to the DT
+        const annoteDls = window.document.querySelectorAll('dt[data-target-cell]');
+        for (const annoteDlNode of annoteDls) {
+          annoteDlNode.addEventListener('click', (event) => {
+            const clickedEl = event.target;
+            if (clickedEl !== selectedAnnoteEl) {
+              unselectCodeLines();
+              const activeEl = window.document.querySelector('dt[data-target-cell].code-annotation-active');
+              if (activeEl) {
+                activeEl.classList.remove('code-annotation-active');
+              }
+              selectCodeLines(clickedEl);
+              clickedEl.classList.add('code-annotation-active');
+            } else {
+              // Unselect the line
+              unselectCodeLines();
+              clickedEl.classList.remove('code-annotation-active');
+            }
+          });
+        }
+    const findCites = (el) => {
+      const parentEl = el.parentElement;
+      if (parentEl) {
+        const cites = parentEl.dataset.cites;
+        if (cites) {
+          return {
+            el,
+            cites: cites.split(' ')
+          };
+        } else {
+          return findCites(el.parentElement)
+        }
+      } else {
+        return undefined;
+      }
+    };
+    var bibliorefs = window.document.querySelectorAll('a[role="doc-biblioref"]');
+    for (var i=0; i<bibliorefs.length; i++) {
+      const ref = bibliorefs[i];
+      const citeInfo = findCites(ref);
+      if (citeInfo) {
+        tippyHover(citeInfo.el, function() {
+          var popup = window.document.createElement('div');
+          citeInfo.cites.forEach(function(cite) {
+            var citeDiv = window.document.createElement('div');
+            citeDiv.classList.add('hanging-indent');
+            citeDiv.classList.add('csl-entry');
+            var biblioDiv = window.document.getElementById('ref-' + cite);
+            if (biblioDiv) {
+              citeDiv.innerHTML = biblioDiv.innerHTML;
+            }
+            popup.appendChild(citeDiv);
+          });
+          return popup.innerHTML;
+        });
+      }
+    }
+  });
+  </script>
+</div> <!-- /content -->
+
+
+
+
+</body></html>

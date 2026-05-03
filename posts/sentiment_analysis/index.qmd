@@ -1,0 +1,400 @@
+---
+title: '"And I''m looking for the funnies": sentiment in Lithuanian news headlines'
+author: "Julius Bogomolovas"
+date: "2026-05-02"
+categories: [R, Bayesian, brms, Ordinal Regression, NLP, LLM, Lithuanian, Media Analysis]
+bibliography: grateful-refs.bib
+image: "thermo.png"
+format:
+  html:
+    code-fold: true
+    code-summary: "Show code"
+    toc: true
+    toc-depth: 3
+    fig-width: 10
+    fig-height: 6
+freeze: true
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(
+  echo    = FALSE,
+  message = FALSE,
+  warning = FALSE,
+  fig.align = "center"
+)
+
+suppressPackageStartupMessages({
+  library(tidyverse)
+  library(scales)
+  library(brms)
+  library(tidybayes)
+  library(patchwork)
+  library(grateful)
+})
+
+theme_set(
+  theme_minimal(base_size = 11) +
+    theme(
+      plot.title.position = "plot",
+      plot.title    = element_text(face = "plain", size = 13),
+      plot.subtitle = element_text(color = "grey40"),
+      plot.caption  = element_text(color = "grey50", hjust = 0),
+      panel.grid.minor = element_blank()
+    )
+)
+```
+
+```{r load_data, include = FALSE}
+lt_headlines <- suppressMessages(read_csv("lt_headlines.csv"))
+
+lt <- lt_headlines |>
+  filter(!is.na(sentiment)) |>
+  group_by(source) |>
+  filter(n() > 20) |>
+  ungroup() |>
+  mutate(
+    sent_ord = factor(sprintf("%.1f", round(sentiment, 1)),
+                      levels = sprintf("%.1f", seq(-1, 1, 0.1)),
+                      ordered = TRUE),
+    source = factor(source),
+    topic  = factor(topic)
+  )
+lt$sent_ord <- droplevels(lt$sent_ord)
+
+n_total    <- nrow(lt)
+n_sources  <- n_distinct(lt$source)
+date_range <- range(as.Date(lt$date))
+n_topics   <- n_distinct(lt$topic)
+```
+
+```{r load_fit, include = FALSE}
+fit <- brm(
+  sent_ord ~ 1 + (1 | source) + (1 | topic) + (1 | source:topic),
+  data    = lt,
+  family  = cumulative(link = "logit"),
+  prior   = c(prior(normal(0, 5), class = "Intercept"),
+              prior(normal(0, 1), class = "sd")),
+  chains  = 8, cores = 8, iter = 2000, warmup = 1000,
+  control = list(adapt_delta = 0.95),
+  seed    = 42, file = "fit_brm_ord", refresh = 0
+)
+```
+
+There's a moment in Suzanne Vega's *Tom's Diner* where the narrator picks up a newspaper, skips the stories, and goes straight to the funnies. It's a small, accurate observation about reading the news: most of it doesn't feel good, so you protect yourself.
+
+I wanted to know how true that is, in numbers. Are Lithuanian news headlines as relentlessly negative as they feel? Are some outlets more negative than others?
+
+To find out, I built a small system that hourly pulls RSS feeds from `r n_sources` Lithuanian outlets, deduplicates by URL, and sends each new headline to Claude Sonnet 4.6. The model returns three things: a sentiment score in [-1, +1], an IPTC Media Topic label (one of 17 international press categories like *politics*, *sport*, *crime, law and justice*), and up to three named entities.
+
+Two things made this approach attractive. First, Lithuanian is heavily inflected and has limited classical NLP tooling, so a frontier multilingual model handles it cleanly without needing to train anything. Second, using IPTC's controlled vocabulary instead of letting the model invent topic labels makes per-topic comparisons coherent across outlets. Cost is about $0.001 per headline.
+
+After a week, I had `r format(n_total, big.mark = ",")` scored headlines spanning `r as.numeric(diff(date_range)) + 1` days. Here's the distribution of sentiment scores:
+
+*Examples below appear in the original Lithuanian with English translations.*
+
+```{r plot1_distribution, fig.height = 4}
+overall_mean <- mean(lt$sentiment)
+
+ggplot(lt, aes(x = sentiment)) +
+  geom_histogram(binwidth = 0.1, fill = "#4A6FA5",
+                 color = "white", linewidth = 0.3, boundary = 0) +
+  geom_vline(xintercept = 0, color = "grey40", linewidth = 0.3) +
+  geom_vline(xintercept = overall_mean, color = "#993C1D",
+             linewidth = 0.5, linetype = "dashed") +
+  annotate("text", x = overall_mean, y = Inf,
+           vjust = 1.6, hjust = -0.08,
+           label = sprintf("overall mean = %.3f", overall_mean),
+           color = "#993C1D", size = 3.4) +
+  scale_x_continuous(breaks = seq(-1, 1, 0.25), limits = c(-1.05, 1.05)) +
+  scale_y_continuous(labels = comma) +
+  labs(title = "Headline sentiment distribution",
+       subtitle = sprintf("%s headlines across %d outlets, %s to %s",
+                          format(n_total, big.mark = ","), n_sources,
+                          format(date_range[1], "%b %d"),
+                          format(date_range[2], "%b %d, %Y")),
+       x = "Sentiment score", y = "Headlines")
+```
+
+To make the score concrete, here are real processed headlines from the dataset at three different sentiment levels and topics. Claude does a pretty good job.
+
+```{r plot1_examples}
+tibble(
+  Score = c("-0.7", "0.0", "+0.7"),
+  Topic = c(
+    "disaster, accident and emergency incident",
+    "economy, business and finance",
+    "education"
+  ),
+  Lithuanian = c(
+    "Vilkaviškyje dingo iš ligoninės pasišalinęs nepilnametis",
+    "Klausiate, atsakome. Ar antstoliai nuskaitys atgautas antrosios pensijų pakopos lėšas?",
+    "Klaipėdos Vydūno gimnazijos pirmokai Lietuvai atstovaus robotikos čempionate Honkonge"
+  ),
+  English = c(
+    "A minor went missing after leaving a hospital in Vilkaviškis",
+    "Q&A on whether bailiffs will deduct recovered second-pillar pension funds",
+    "Klaipėda's Vydūnas Gymnasium first-years will represent Lithuania at a robotics championship in Hong Kong"
+  )
+) |>
+  knitr::kable(caption = "Example headlines at three sentiment levels")
+```
+
+The distribution is clearly bimodal, with two humps separated by a trough at zero. Headlines exist to provoke; pure neutrality is rare. Most lean one way or the other, and few are ambivalent.
+
+So I went looking for differences between outlets. The chart said `15min.lt` was the most negative outlet in Lithuania. The chart was wrong. Not because the number was wrong, but because the comparison wasn't fair. Here's what went wrong, and what the data actually shows.
+
+# The first (wrong) finding {.unnumbered}
+
+I plotted mean sentiment per outlet, ranked them, and got this:
+
+```{r plot2_naive, fig.height = 4}
+naive_means <- lt |>
+  group_by(source) |>
+  summarise(
+    n         = n(),
+    mean_sent = mean(sentiment),
+    se        = sd(sentiment) / sqrt(n),
+    .groups   = "drop"
+  ) |>
+  arrange(mean_sent)
+
+ggplot(naive_means, aes(x = mean_sent, y = fct_reorder(source, mean_sent))) +
+  geom_vline(xintercept = 0, color = "grey70", linewidth = 0.3) +
+  geom_pointrange(aes(xmin = mean_sent - 1.96 * se, xmax = mean_sent + 1.96 * se),
+                  size = 0.4, color = "#444") +
+  geom_text(aes(label = sprintf("n=%s", format(n, big.mark = ","))),
+            hjust = -0.3, size = 3.2, color = "grey50") +
+  scale_x_continuous(limits = c(-0.25, 0.25), breaks = seq(-0.25, 0.10, 0.25)) +
+  labs(title = "Mean sentiment per outlet, the chart that was wrong",
+       subtitle = "95% confidence intervals on the raw mean",
+       x = "Mean headline sentiment", y = NULL)
+```
+
+By this measure, 15min sits noticeably below everyone else. If I had published this as the result, it would have looked clean and confident, and it would have been misleading.
+
+# What I missed {.unnumbered}
+
+Outlets cover different mixes of topics, and topics carry their own sentiment baseline. Crime headlines are negative everywhere; sport headlines are positive everywhere. So a fair comparison has to account for what each outlet writes about, not just how their headlines score on average.
+
+# What the model says {.unnumbered}
+
+The right tool is **partial pooling with a hierarchical Bayesian model**. The intuition: every headline's sentiment is a sum of effects, namely what topic it's about, which outlet wrote it, and whether this particular outlet treats this particular topic differently from average. The model estimates each piece simultaneously and shrinks small-sample estimates toward the population mean. So an outlet with three crime headlines doesn't get to claim a wildly different "crime tone" from one with three hundred. Its estimate gets pulled toward what we know about crime coverage in general.
+
+Three modelling choices need a brief defence:
+
+**Why ordinal, not Gaussian?** A linear regression on sentiment treats the score as if it were continuous and normally distributed. It isn't. The scores live on 21 discrete rungs from -1.0 to +1.0 in steps of 0.1, and the histogram you saw earlier is bimodal, not bell-shaped. Fitting a Gaussian model gives sensible *rankings* but unreliable uncertainty estimates and ugly posterior predictive checks. Cumulative ordinal regression handles the discrete, bimodal structure natively.
+
+**Why Bayesian, not frequentist?** I fit several frequentist models first as sanity checks (`lm`, `polr`, `clmm`), and they all agreed on the substantive answer. The Bayesian fit adds three things the frequentist alternatives can't: honest credible intervals on variance components (especially important when the source-level variance is genuinely small and a frequentist point estimate near zero is misleading), proper partial pooling that's robust to sparse cells in the source by topic interaction, and posterior distributions that visualise uncertainty as shape rather than as a confidence-interval bar.
+
+**Why the source by topic interaction?** Without it, "outlets are similar on average" would be the only thing the model could say. The interaction term is what lets us ask the more interesting question: does any outlet treat any specific topic unusually, even if it doesn't differ on average? That's where editorial fingerprints actually live, and we'll come back to it.
+
+I fit the model in `brms` with weakly informative priors and 8 chains by 2000 iterations. All R-hat values came in below 1.01. Diagnostics are in the appendix.
+
+The first thing the model tells us is the variance budget, namely how much of headline-level sentiment variation lives at each level:
+
+```{r variance_components, fig.height = 2.8}
+vc <- posterior_summary(fit,
+  variable = c("sd_source__Intercept",
+               "sd_topic__Intercept",
+               "sd_source:topic__Intercept")) |>
+  as.data.frame() |>
+  rownames_to_column("level") |>
+  mutate(level = recode(level,
+    "sd_source__Intercept"        = "Outlet",
+    "sd_topic__Intercept"         = "Topic",
+    "sd_source:topic__Intercept"  = "Outlet by topic"
+  )) |>
+  mutate(level = factor(level, levels = c("Topic", "Outlet by topic", "Outlet")))
+
+ggplot(vc, aes(x = Estimate, y = level)) +
+  geom_pointrange(aes(xmin = Q2.5, xmax = Q97.5),
+                  size = 0.5, color = "#185FA5", linewidth = 0.7) +
+  geom_text(aes(label = sprintf("%.2f", Estimate)),
+            vjust = -1.2, size = 3.2, color = "grey40") +
+  scale_x_continuous(limits = c(0, 2.2)) +
+  labs(title = "How much sentiment variation lives at each level?",
+       subtitle = "Posterior SD on the latent log-odds scale, with 95% credible intervals",
+       x = "Standard deviation", y = NULL)
+```
+
+Topic-level variation is roughly 12 times outlet-level variation. The story is overwhelmingly: *what* a headline is about determines *how* it reads, far more than *who* wrote it.
+
+# Topic effects, the dominant signal {.unnumbered}
+
+Here's how each topic shifts sentiment, regardless of outlet. Crime and disaster anchor the negative end across the board; sport and culture anchor the positive end:
+
+```{r plot3_topics, fig.height = 6.5}
+topic_draws <- fit |>
+  spread_draws(r_topic[topic, ]) |>
+  mutate(topic = str_replace_all(topic, "\\.", " "))
+
+ggplot(topic_draws, aes(x = r_topic, y = fct_reorder(topic, r_topic))) +
+  stat_halfeye(.width = c(0.66, 0.95),
+               fill = "#F5C4B3", alpha = 0.8,
+               point_color = "#993C1D", point_size = 1.5,
+               interval_color = "#993C1D") +
+  geom_vline(xintercept = 0, color = "grey50",
+             linewidth = 0.3, linetype = "dashed") +
+  labs(title = "Sentiment by topic, across all outlets",
+       subtitle = "Posterior distributions on log-odds scale.\nEach unit roughly doubles the odds of landing in a higher sentiment category.",
+       x = "Topic effect (log-odds offset from grand mean)",
+       y = NULL)
+```
+
+The pattern matches intuition: arts, lifestyle, sport, and science cluster at the top. These are stories of achievement, performance, and discovery. Crime and disaster anchor the bottom, with conflict close behind. Politics sits in mildly negative territory, while weather, economy, and health hover near zero, where the framing depends almost entirely on the specific event.
+
+The range is what matters most. Topic effects span more than 5 log-odds top to bottom, a huge range, meaning a sport headline is many times more likely to land in the upper sentiment categories than a crime headline, regardless of who wrote it. Outlet effects, as we'll see next, span barely a tenth of that.
+
+# Outlet effects, what's left after topic {.unnumbered}
+
+Once the model accounts for topic mix, the gap between outlets nearly disappears:
+
+```{r plot4_outlets, fig.height = 4}
+# Order outlets by their posterior mean (most negative at bottom).
+# Use whatever string representation spread_draws returns to avoid
+# factor-level mismatches.
+post_order <- fit |>
+  spread_draws(r_source[source, ]) |>
+  group_by(source) |>
+  summarise(post_mean = mean(r_source), .groups = "drop") |>
+  arrange(post_mean) |>
+  pull(source)
+
+source_draws <- fit |>
+  spread_draws(r_source[source, ]) |>
+  mutate(source = factor(source, levels = post_order))
+
+ggplot(source_draws, aes(x = r_source, y = source)) +
+  stat_halfeye(.width = c(0.66, 0.95),
+               fill = "#85B7EB", alpha = 0.8,
+               point_color = "#185FA5", point_size = 1.5,
+               interval_color = "#185FA5") +
+  geom_vline(xintercept = 0, color = "grey50",
+             linewidth = 0.3, linetype = "dashed") +
+  scale_x_continuous(limits = c(-0.4, 0.4), breaks = seq(-0.4, 0.4, 0.2)) +
+  labs(title = "Outlet effects after controlling for topic",
+       subtitle = "Posterior distributions on log-odds scale.\nFat clouds clustered near zero mean outlets barely differ on average.",
+       x = "Outlet effect (log-odds offset from average outlet)",
+       y = NULL)
+```
+
+These are the same outlets that looked dramatically different in the naive chart. After the model accounts for what each one covers, they're nearly indistinguishable. Lrytas and 15min lean slightly negative; LRT and Verslo žinios lean slightly positive; the credible intervals overlap heavily and most include zero.
+
+Notice also that the order has shifted from the naive chart. Vakaru ekspresas was at the top of the raw ranking on the strength of just 133 headlines; partial pooling now pulls that small-sample estimate toward the population mean, and Verslo žinios takes the top spot. The differences remain small either way.
+
+The naive ranking didn't lie about the numbers. It lied about what those numbers meant.
+
+# Where outlets actually differ {.unnumbered}
+
+But "outlets are similar on average" doesn't mean "outlets are interchangeable." The interaction term, *does this outlet cover this specific topic differently from how that topic is treated on average?*, is where editorial fingerprints actually live.
+
+```{r plot5_interactions, fig.height = 5}
+# Robust separator: split source from topic by matching the longest
+# valid source name as a prefix (handles any internal characters in topic)
+valid_sources <- levels(lt$source)
+valid_sources_sorted <- valid_sources[order(nchar(valid_sources), decreasing = TRUE)]
+source_pattern <- paste0("^(", paste(valid_sources_sorted, collapse = "|"), ")_(.+)$")
+
+top_inter <- fit |>
+  spread_draws(`r_source:topic`[source_topic, ]) |>
+  mutate(
+    source = str_match(source_topic, source_pattern)[, 2],
+    topic  = str_match(source_topic, source_pattern)[, 3] |>
+             str_replace_all("\\.", " ")
+  ) |>
+  filter(!is.na(source), !is.na(topic)) |>
+  group_by(source, topic) |>
+  summarise(
+    mean_eff = mean(`r_source:topic`),
+    l95      = quantile(`r_source:topic`, 0.025),
+    u95      = quantile(`r_source:topic`, 0.975),
+    .groups  = "drop"
+  ) |>
+  filter(sign(l95) == sign(u95)) |>
+  arrange(desc(abs(mean_eff))) |>
+  slice_head(n = 10) |>
+  mutate(label     = sprintf("%s by %s", source, topic),
+         direction = if_else(mean_eff > 0,
+                             "more positive than topic average",
+                             "more negative than topic average"))
+
+ggplot(top_inter, aes(x = mean_eff,
+                      y = fct_reorder(label, mean_eff),
+                      color = direction)) +
+  geom_vline(xintercept = 0, color = "grey50", linewidth = 0.3, linetype = "dashed") +
+  geom_pointrange(aes(xmin = l95, xmax = u95), size = 0.5, linewidth = 0.7) +
+  scale_color_manual(values = c("more negative than topic average" = "#993C1D",
+                                "more positive than topic average" = "#0F6E56"),
+                     name = NULL) +
+  labs(title = "Where editorial fingerprints actually show up",
+       subtitle = "Top outlet by topic combinations whose 95% CI excludes zero.",
+       x = "Interaction effect (log-odds)",
+       y = NULL) +
+  theme(legend.position = "top")
+```
+
+These are the cells that survive the strictest filter, namely combinations where we are 95% confident the effect is nonzero. They're not the only differences between outlets, just the ones we can be confident about given the data we have.
+
+On the positive side: LRT covers human interest and sport more positively than other outlets do, and 15min covers health more positively than the cross-outlet average for health. On the negative side: Lrytas covers disaster more negatively, LRT covers conflict more negatively, and Delfi covers sport more negatively than the cross-outlet baseline. The Delfi sport finding is notable because sport runs positive everywhere else.
+
+The story isn't "this outlet is negative." The story is "this outlet covers *this thing* unusually."
+
+# What I can and can't say {.unnumbered}
+
+This analysis supports:
+
+- Lithuanian news headlines on average sit slightly below sentiment-neutral.
+- Topic is by far the strongest determinant of headline sentiment, about an order of magnitude larger than the outlet effect.
+- After controlling for topic mix, outlets are far more similar in tone than the raw chart suggests.
+- Editorial differences between outlets exist, but live mostly in *which topics they cover unusually*, not in average tone.
+- Crime, conflict, and disaster anchor the negative end across all outlets; sport and culture anchor the positive end.
+
+This analysis does **not** support:
+
+- Causal claims about why outlets cover what they do.
+- Claims about *framing* in any deep sense. Sentiment of a headline is not the same as bias of a story.
+- Generalisation beyond the specific RSS feeds I sampled.
+- Anything about audience response. Sentiment of headlines is not sentiment of readers.
+
+# Methodology {.unnumbered}
+
+`r format(n_total, big.mark = ",")` headlines from `r n_sources` Lithuanian outlets (`r paste(levels(lt$source), collapse = ", ")`) over `r as.numeric(diff(date_range)) + 1` days. Sentiment scores live on 21 discrete rungs from -1.0 to +1.0 in steps of 0.1, assigned by Claude Sonnet 4.6. Topic labels come from the IPTC Media Topics taxonomy (17 top-level categories). The statistical model is a cumulative ordinal Bayesian regression with random intercepts for source, topic, and source by topic, fit with `brms` using 8 chains by 2000 iterations (1000 warmup). Priors: `normal(0, 5)` for thresholds, `normal(0, 1)` for random-effect SDs. All R-hat values were below 1.01 and effective sample sizes above 1500 across parameters of interest. Pipeline and code are open source.
+
+# Software and packages {.unnumbered}
+
+```{r grateful_refs, results = "asis"}
+cite_packages(
+  pkgs = c("base", "brms", "tidybayes", "tidyverse",
+           "patchwork", "scales", "grateful"),
+  output = "paragraph",
+  out.dir = ".",
+  include.RStudio = FALSE
+)
+```
+
+# Appendix: model diagnostics {.unnumbered}
+
+```{r diagnostics_pp, fig.height = 4}
+pp_check(fit, ndraws = 50, type = "bars") +
+  labs(title = "Posterior predictive check",
+       subtitle = "Light blue bars: observed counts per sentiment rung. Dark dots and intervals: 50 simulated distributions from the fitted model.",
+       x = "Sentiment rung index (1 = -0.9, 19 = +0.9)",
+       y = "Count")
+```
+
+If the simulated intervals cover the observed bars, the model is generating data that looks like the data we have.
+
+```{r diagnostics_table}
+posterior_summary(fit,
+  variable = c("sd_source__Intercept",
+               "sd_topic__Intercept",
+               "sd_source:topic__Intercept")) |>
+  as.data.frame() |>
+  rownames_to_column("Parameter") |>
+  mutate(across(where(is.numeric), \(x) round(x, 3))) |>
+  rename(`95% CI lower` = Q2.5, `95% CI upper` = Q97.5) |>
+  knitr::kable(caption = "Variance components: posterior summaries")
+```
+
+---
