@@ -1,0 +1,1515 @@
+---
+title: "Conway–Maxwell–Poisson vs Welch's t-test for proliferation count data"
+author: "Julius Bogomolovas"
+date: "2026-05-19"
+categories: [R, GLM, GLMM, Count Regression, CMP, Power Analysis, Gaussian Process, LHS, Sobol]
+bibliography: grateful-refs.bib
+image: "heart.png"
+format:
+  html:
+    code-fold: true
+    code-summary: "Show code"
+    toc: true
+    toc-depth: 3
+    fig-width: 10
+    fig-height: 6
+freeze: true
+resources:
+  - "*.rds"
+---
+
+There is a Chinese saying, 物尽其用, which approximately translates as "make the best use of everything." I first came across it as the title of a Song Dong installation at MoMA. So in this post I am testing whether a 物尽其用 approach to quantifying cell proliferation actually does better than the standard one.
+
+In my work I count proliferating cardiomyocytes and compare proliferation rates between wild-type and knockout hearts. The data comes from tissue sections stained for a cardiomyocyte marker and a proliferation marker, which gives me, per microscopy field, the total number of CMs and the number of proliferating CMs.
+
+The standard analysis is a t-test on per-animal proliferation ratios. The moment you take that path, three things get thrown away: the within-animal variation sitting right there across the multiple fields per heart; the statistical weight that should come with larger denominators (1/10 and 100/1000 are not equally trustworthy estimates of 0.1); and the awkward fact that ratios live in [0,1], which is not where a t-test wants its data. None of these are catastrophic on their own. Together they motivate an obvious question: what if we kept the information instead?
+
+Two of the three losses, the statistical weight and the bounded distribution, are about how you model the count itself, and count regression fixes both. Instead of collapsing into a ratio, you model the raw counts directly, with total cells counted entering as an offset. The offset is what carries the credibility of each estimate into the analysis, and the model respects the discrete, bounded-below, often-overdispersed nature of count data. The third loss, within-animal variation, is about how you treat the nesting. It is fixed by adding a random intercept per animal, so the model separates between-animal from within-animal variance instead of averaging it away.
+
+These are two orthogonal decisions. Crossed, they give a **2×2 of methods**, all of which I'll evaluate side by side:
+
+- **Animal-level (no random effects).** Aggregate fields to one number per animal, then test. Welch's t-test (on ratios) vs Conway–Maxwell–Poisson (CMP) GLM (on counts). This is the standard biologist workflow.
+- **Field-level (with random effects).** Keep the field structure, add a random intercept per animal. Linear mixed model (LMM) on ratios vs CMP GLMM on counts.
+
+I argued the count-regression half of this case in [my previous publication](https://pubmed.ncbi.nlm.nih.gov/36563012/) (Bogomolovas et al., 2022), where I walked from raw microscopy images through AI-based cell counts to count-regression statistics. But I kept saying "I should formally test this." Here it is. I believe the 物尽其用 approach is the better one, but is it always better than the default? Where does it shine? Are there regimes where the simpler approach holds up just fine?
+
+I build the comparison from scratch: a data generator, four fitters in one place, a Latin-hypercube sweep of the realistic experimental design space, and Gaussian process emulators that let me ask questions about method behaviour anywhere in that space, not just at the handful of points I simulated. The post is organised by metric — Type-I error, statistical power, CI precision — comparing all four methods on each in turn, then a practical recommendation at the end.
+
+## Setup
+
+```{r setup}
+#| label: setup
+#| code-fold: show
+suppressPackageStartupMessages({
+  library(dplyr); library(tidyr); library(ggplot2); library(patchwork)
+  library(scales); library(knitr)
+  library(COMMultReg)             # r_cmb, e_cmb: the simulator's count distribution
+  library(glmmTMB); library(emmeans)
+  library(lme4);   library(lmerTest)
+  library(hetGP)                  # GP emulators
+  library(lhs)                    # Latin hypercube sampling (used in LHS demo figure)
+  library(GGally)                 # ggpairs (used in LHS demo figure)
+  library(grateful)               # auto-generated package citations
+})
+
+# Shared visual conventions
+theme_set(theme_bw(base_size = 11))
+
+method_colors_no_re <- c("Welch's t-test" = "#4A7FB8",
+                         "CMP GLM"        = "#C0504D")
+method_colors_re    <- c("LMM" = "#4A7FB8", "CMP GLMM" = "#C0504D")
+
+# Tiny utilities used everywhere
+loguni <- function(u, lo, hi) exp(log(lo) + u * (log(hi) - log(lo)))
+
+# Smoothed logit so 0% and 100% rejection rates don't blow up the GP
+logit_p <- function(p, n) {
+  p_adj <- (p * n + 0.5) / (n + 1)
+  log(p_adj / (1 - p_adj))
+}
+
+# p-value formatting for plot annotations
+fmt_p <- function(p) {
+  if (is.na(p)) return("p = NA")
+  if (p >= 0.001) return(sprintf("p = %.3f", p))
+  e <- floor(log10(p)); m <- p / 10^e
+  sprintf("p = %.1f \u00d7 10^%d", m, e)
+}
+```
+
+## The data generator
+
+A proliferation experiment has a three-level hierarchy: **group → animal → field**. The generator below produces one row per field, with these knobs:
+
+- `p0`: baseline proliferation rate (control group mean)
+- `change`: multiplicative effect size; `1.0` is the null
+- `CV`: between-animal coefficient of variation (biological scatter)
+- `nu`: within-field dispersion of the count distribution (measurement noise; $\nu = 1$ is the binomial baseline, $\nu < 1$ is overdispersed, $\nu > 1$ is underdispersed)
+- `n_animals`, `n_replicates`, `m`: animals per group, fields per animal, cells per field
+
+A quick note on how I landed on Beta + Conway–Maxwell–Binomial (CMB) rather than the more obvious alternatives. I first tried a Conway–Maxwell–Poisson (CMP) draw with total cells as a fixed offset. That ran into trouble: CMP is upper-unbounded, so draws sometimes overflowed the offset and produced more proliferating cells than were counted in total. That cannot happen biologically. The CMB is bounded by $m$ by construction, which removes the overflow problem entirely. The same logic applies one level up at the animal rates: drawing them as $p_0$ + Normal noise occasionally produced rates > 1, so I switched to drawing directly from a Beta with prescribed mean and CV. The Beta lives on $(0,1)$ by construction.
+
+A CMB regression would be the natural choice here since the generator itself is CMB, but no CMB regression package exists yet. So I stuck with CMP for the fitters, which works fine in practice as you will see below. I am thinking of putting together a CMB regression myself at some point; most of the pieces are already out there.
+
+Three implementation details worth surfacing. The CMB's mean is only $m \cdot p$ when $\nu = 1$. For any other $\nu$ I numerically invert the expected-value function so that a target rate produces draws that realize that rate on average. That is what `p_from_rate` is doing in the code below. Secondly, animal IDs are group-prefixed (`ctrl1` and `cko1` are *different* animals) so a random-effect term can't collapse across groups by accident. Finally, the multi-field structure is preserved even when the analysis aggregates it away. That way the same generator feeds both pipelines, with and without random animal effect.
+
+```{r generator}
+#| label: generator
+#| code-fold: show
+
+# Invert e_cmb so the caller specifies a target rate and gets back the p-parameter
+p_from_rate <- function(target_rate, m, nu) {
+  target_rate <- pmax(pmin(target_rate, 0.999), 0.001)
+  if (abs(nu - 1) < 1e-10) return(target_rate)
+  tryCatch(
+    uniroot(function(p) e_cmb(m, p, nu) / m - target_rate,
+            lower = 1e-6, upper = 1 - 1e-6, tol = 1e-8)$root,
+    error = function(e) target_rate
+  )
+}
+
+# Beta with prescribed (mean = mu, SD = mu * CV). Support is (0,1) by construction.
+draw_animal_rates <- function(mu, CV, n) {
+  if (CV <= 0) return(rep(mu, n))
+  sigma2 <- (mu * CV)^2
+  if (sigma2 >= mu * (1 - mu)) {
+    stop(sprintf("Beta infeasible: mu=%.3g with CV=%.3g requires CV < %.3g",
+                 mu, CV, sqrt((1 - mu) / mu)))
+  }
+  conc <- mu * (1 - mu) / sigma2 - 1
+  rbeta(n, shape1 = mu * conc, shape2 = (1 - mu) * conc)
+}
+
+simulate_experiment <- function(p0 = 0.05, change = 1.3, CV = 0.1, nu = 1.0,
+                                n_animals = 6, n_replicates = 3, m = 500) {
+  wt_rates <- draw_animal_rates(p0,          CV, n_animals)
+  ko_rates <- draw_animal_rates(p0 * change, CV, n_animals)
+
+  wt_p <- vapply(wt_rates, p_from_rate, numeric(1), m = m, nu = nu)
+  ko_p <- vapply(ko_rates, p_from_rate, numeric(1), m = m, nu = nu)
+
+  wt_counts <- unlist(lapply(wt_p, function(p) replicate(n_replicates, r_cmb(1, m, p, nu))))
+  ko_counts <- unlist(lapply(ko_p, function(p) replicate(n_replicates, r_cmb(1, m, p, nu))))
+
+  EmbryoID <- c(rep(paste0("ctrl", seq_len(n_animals)), each = n_replicates),
+                rep(paste0("cko",  seq_len(n_animals)), each = n_replicates))
+
+  data.frame(
+    Y        = as.integer(c(wt_counts, ko_counts)),
+    N        = m,
+    Group    = factor(c(rep("ctrl", n_animals * n_replicates),
+                        rep("cko",  n_animals * n_replicates)),
+                      levels = c("ctrl", "cko")),
+    EmbryoID = factor(EmbryoID)
+  )
+}
+```
+
+
+### What the generator produces
+
+Let's simulate an oversized experiment: 200 animals per group, 20 fields each, true effect 1.5×. This makes the three levels of variation easy to see, and gives us a concrete dataset for the sanity check that follows.
+
+```{r demo-generator, fig.height=6}
+#| label: fig-generator
+#| fig-cap: "Three levels of variation in the simulator, run at oversized scale (200 animals per group, 20 fields each, true effect 1.5×). Top left: per-animal rates cluster around the true group means (dashed) with Beta scatter at the animal level. Bottom left: per-field counts add within-animal CMB noise on top. Right: per-animal rates by group, X marking the truth that the simulator recovers on average."
+
+set.seed(1)
+demo <- simulate_experiment(p0 = 0.10, change = 1.5, CV = 0.25, nu = 1.0,
+                            n_animals = 200, n_replicates = 20, m = 500)
+
+per_animal_demo <- demo |>
+  group_by(EmbryoID, Group) |>
+  summarise(animal_rate = mean(Y / N), .groups = "drop")
+
+truth_demo <- data.frame(
+  Group = factor(c("ctrl", "cko"), levels = c("ctrl", "cko")),
+  rate  = c(0.10, 0.10 * 1.5)
+)
+
+p1 <- ggplot(per_animal_demo, aes(x = animal_rate, fill = Group)) +
+  geom_histogram(bins = 40, alpha = 0.6, position = "identity") +
+  geom_vline(data = truth_demo, aes(xintercept = rate, color = Group),
+             linewidth = 0.8, linetype = "dashed") +
+  scale_fill_manual(values  = c(ctrl = "#4A7FB8", cko = "#C0504D"), name = NULL) +
+  scale_color_manual(values = c(ctrl = "#2C4E73", cko = "#7A3431"), name = NULL) +
+  labs(title = "Per-animal rates (Beta)",
+       x = "observed rate", y = "animals")
+
+p2 <- ggplot(demo, aes(x = Y, fill = Group)) +
+  geom_histogram(bins = 50, alpha = 0.6, position = "identity") +
+  scale_fill_manual(values = c(ctrl = "#4A7FB8", cko = "#C0504D"), name = NULL) +
+  labs(title = "Per-field counts (CMB)",
+       x = "count per field (m = 500)", y = "fields")
+
+p3 <- ggplot(per_animal_demo, aes(x = Group, y = animal_rate, fill = Group)) +
+  geom_violin(alpha = 0.5, color = NA) +
+  geom_jitter(width = 0.1, alpha = 0.4, size = 1) +
+  geom_point(data = truth_demo, aes(x = Group, y = rate),
+             shape = 4, size = 4, stroke = 1.2, color = "black",
+             inherit.aes = FALSE) +
+  scale_fill_manual(values = c(ctrl = "#4A7FB8", cko = "#C0504D")) +
+  labs(title = "Per-animal rates by group", x = NULL, y = "animal rate") +
+  theme(legend.position = "none")
+
+(p1 / p2) | p3
+```
+
+## Four methods on one well-resourced experiment
+
+Now to the analysis side. The 2×2 introduced at the start of this post gives four fitters, two per pipeline. All four see exactly the same simulated data; what differs is how they reduce it and what likelihood they assume.
+
+**Animal-level (no random effects)** — aggregate fields to one totals row per animal first, then fit:
+
+- **Welch's t-test** on per-animal proliferation ratios `sum(Y) / sum(N)`. Unequal variances, with Welch–Satterthwaite degrees of freedom (R's `t.test()` returns these by default). The df correction matters at small n: a naive z would be anti-conservative.
+- **CMP GLM** on per-animal totals: `glmmTMB(Y_tot ~ Group + offset(log(N_tot)), family = compois())`. The `offset(log(N_tot))` turns count regression into rate regression, so the model fits log-rates with each animal's denominator entering as statistical weight. The Conway–Maxwell–Poisson dispersion parameter $\nu$ is estimated from the data, so the model adapts to overdispersion or underdispersion automatically rather than assuming Poisson variance.
+
+**Field-level (with random effects)** — keep the field × animal hierarchy and add a random intercept per animal:
+
+- **LMM** on per-field ratios: `lmer(Y/N ~ Group + (1 | EmbryoID))`. Satterthwaite df via lmerTest, exposed through emmeans.
+- **CMP GLMM** on field-level counts: `glmmTMB(Y ~ Group + offset(log(N)) + (1 | EmbryoID), family = compois())`. Same count likelihood as the GLM version, but the random intercept lets the model separate between-animal from within-animal variation rather than averaging it away.
+
+By aggregating to per-animal totals, Pipeline A sidesteps pseudoreplication at the field level — at the cost of losing within-animal variation. Pipeline B keeps it.
+
+### Shared inference machinery
+
+The same three-step inference setup runs across all four fitters, so that the only methodological difference between methods within a pipeline is the likelihood:
+
+1. **emmeans for clean contrasts.** The raw output of `summary(glmmTMB_fit)` (or `lmer`) is a coefficient table that's cumbersome to read as a "cko vs ctrl group contrast on the appropriate scale". I pull the contrast through `emmeans`: `contrast(emmeans(fit, ~ Group, offset = 0), "revpairwise")` returns a clean cko − ctrl difference on the right scale for each method.
+2. **Satterthwaite df for finite-n correction.** Each *pipeline* shares a single df: the Gaussian fitter computes it natively (Welch's t-test in Pipeline A, lmerTest in Pipeline B), and the count-likelihood fitter inherits it via `emmeans(..., df = ...)`. So Welch and CMP GLM use the same df; LMM and CMP GLMM use the same df. The only remaining difference between methods within a pipeline is the likelihood.
+3. **Delta-transform for common-scale presentation.** Welch's t-test and LMM return rate differences natively; CMP returns log-rate-ratios. I delta-transform the Gaussian outputs to log-rate-ratio so all four methods report on the same scale, with the same Satterthwaite df propagating to the CI half-widths.
+
+The two fitter functions implementing all of the above:
+
+```{r fit-no-re}
+#| label: fit-no-re
+#| code-fold: true
+
+fit_no_re <- function(data, change, p0) {
+  truth_ttest <- p0 * (change - 1)
+  truth_logRR <- log(change)
+
+  per_animal <- data |>
+    group_by(EmbryoID, Group) |>
+    summarise(Y_tot = sum(Y), N_tot = sum(N), ratio = sum(Y) / sum(N),
+              .groups = "drop")
+
+  # Welch's t-test, native rate-difference scale
+  tt <- tryCatch({
+    t <- t.test(ratio ~ Group, data = per_animal, var.equal = FALSE)
+    list(pvalue = unname(t$p.value), df = unname(t$parameter),
+         estimate = unname(diff(t$estimate)),
+         CI_lo = -t$conf.int[2], CI_hi = -t$conf.int[1], converged = TRUE)
+  }, error = function(e) list(pvalue = NA_real_, df = NA_real_,
+                              estimate = NA_real_, CI_lo = NA_real_,
+                              CI_hi = NA_real_, converged = FALSE))
+  df_use <- if (is.na(tt$df)) Inf else tt$df
+
+  # t-test on log-RR via delta method
+  tt_logRR <- tryCatch({
+    grp <- per_animal |> group_by(Group) |>
+      summarise(m = mean(ratio), s = sd(ratio) / sqrt(n()), .groups = "drop")
+    mc <- grp$m[grp$Group == "ctrl"]; mk <- grp$m[grp$Group == "cko"]
+    sc <- grp$s[grp$Group == "ctrl"]; sk <- grp$s[grp$Group == "cko"]
+    if (mc <= 0 || mk <= 0) stop("non-positive group mean")
+    est <- log(mk / mc); se <- sqrt((sk/mk)^2 + (sc/mc)^2)
+    tcrit <- qt(0.975, df_use)
+    list(estimate = est, CI_lo = est - tcrit*se, CI_hi = est + tcrit*se)
+  }, error = function(e) list(estimate = NA_real_, CI_lo = NA_real_, CI_hi = NA_real_))
+
+  # CMP GLM on per-animal totals
+  cmp <- tryCatch({
+    fit <- suppressWarnings(glmmTMB(Y_tot ~ Group + offset(log(N_tot)),
+                                    family = compois(), data = per_animal))
+    ok  <- !is.null(fit$fit$convergence) && fit$fit$convergence == 0 &&
+           !is.null(fit$sdr) && isTRUE(fit$sdr$pdHess)
+    con <- contrast(emmeans(fit, ~ Group, offset = 0), "revpairwise", df = df_use)
+    cs  <- as.data.frame(summary(con)); ci <- as.data.frame(confint(con))
+    list(pvalue = cs$p.value[1], estimate = cs$estimate[1],
+         CI_lo = ci$lower.CL[1], CI_hi = ci$upper.CL[1], converged = ok)
+  }, error = function(e) list(pvalue = NA_real_, estimate = NA_real_,
+                              CI_lo = NA_real_, CI_hi = NA_real_, converged = FALSE))
+
+  data.frame(
+    method      = c("t_test", "cmp_glm"),
+    pvalue      = c(tt$pvalue, cmp$pvalue),
+    estimate    = c(tt$estimate, cmp$estimate),
+    CI_lo       = c(tt$CI_lo, cmp$CI_lo),
+    CI_hi       = c(tt$CI_hi, cmp$CI_hi),
+    estimate_logRR = c(tt_logRR$estimate, cmp$estimate),
+    CI_lo_logRR    = c(tt_logRR$CI_lo,    cmp$CI_lo),
+    CI_hi_logRR    = c(tt_logRR$CI_hi,    cmp$CI_hi),
+    width_logRR    = c(tt_logRR$CI_hi - tt_logRR$CI_lo,
+                       cmp$CI_hi - cmp$CI_lo),
+    truth_logRR    = c(truth_logRR, truth_logRR),
+    converged      = c(tt$converged, cmp$converged)
+  )
+}
+```
+
+```{r fit-re}
+#| label: fit-re
+#| code-fold: true
+
+fit_re <- function(data, change, p0) {
+  truth_logRR <- log(change)
+  data$rate <- data$Y / data$N
+
+  # LMM on per-field ratios (native = rate diff)
+  lmm_n <- tryCatch({
+    fit <- suppressMessages(lmer(rate ~ Group + (1 | EmbryoID), data = data))
+    con <- contrast(emmeans(fit, ~ Group), "revpairwise")
+    cs  <- as.data.frame(summary(con)); ci <- as.data.frame(confint(con))
+    list(fit = fit, pvalue = cs$p.value[1], df = cs$df[1],
+         estimate = cs$estimate[1], CI_lo = ci$lower.CL[1], CI_hi = ci$upper.CL[1],
+         converged = TRUE)
+  }, error = function(e) list(fit = NULL, pvalue = NA_real_, df = NA_real_,
+                              estimate = NA_real_, CI_lo = NA_real_,
+                              CI_hi = NA_real_, converged = FALSE))
+
+  df_use <- if (is.na(lmm_n$df)) Inf else lmm_n$df
+
+  # LMM log-RR via delta with per-group emmeans SEs
+  lmm_l <- tryCatch({
+    if (is.null(lmm_n$fit)) stop("no LMM")
+    es <- as.data.frame(summary(emmeans(lmm_n$fit, ~ Group)))
+    mc <- es$emmean[es$Group == "ctrl"]; mk <- es$emmean[es$Group == "cko"]
+    sc <- es$SE[es$Group == "ctrl"];     sk <- es$SE[es$Group == "cko"]
+    if (mc <= 0 || mk <= 0) stop("non-positive group mean")
+    est <- log(mk/mc); se <- sqrt((sk/mk)^2 + (sc/mc)^2)
+    tcrit <- qt(0.975, df_use)
+    list(estimate = est, CI_lo = est - tcrit*se, CI_hi = est + tcrit*se)
+  }, error = function(e) list(estimate = NA_real_, CI_lo = NA_real_, CI_hi = NA_real_))
+
+  # CMP GLMM on field-level counts (native = log-RR)
+  cmp <- tryCatch({
+    fit <- suppressWarnings(glmmTMB(Y ~ Group + offset(log(N)) + (1 | EmbryoID),
+                                    family = compois(), data = data))
+    ok  <- !is.null(fit$fit$convergence) && fit$fit$convergence == 0 &&
+           !is.null(fit$sdr) && isTRUE(fit$sdr$pdHess)
+    con <- contrast(emmeans(fit, ~ Group, offset = 0), "revpairwise", df = df_use)
+    cs <- as.data.frame(summary(con)); ci <- as.data.frame(confint(con))
+    list(pvalue = cs$p.value[1], estimate = cs$estimate[1],
+         CI_lo = ci$lower.CL[1], CI_hi = ci$upper.CL[1], converged = ok)
+  }, error = function(e) list(pvalue = NA_real_, estimate = NA_real_,
+                              CI_lo = NA_real_, CI_hi = NA_real_, converged = FALSE))
+
+  data.frame(
+    method      = c("lmm", "cmp_glmm"),
+    pvalue      = c(lmm_n$pvalue, cmp$pvalue),
+    df_used     = c(lmm_n$df, df_use),
+    estimate_logRR = c(lmm_l$estimate, cmp$estimate),
+    CI_lo_logRR    = c(lmm_l$CI_lo,    cmp$CI_lo),
+    CI_hi_logRR    = c(lmm_l$CI_hi,    cmp$CI_hi),
+    width_logRR    = c(lmm_l$CI_hi - lmm_l$CI_lo, cmp$CI_hi - cmp$CI_lo),
+    truth_logRR    = c(truth_logRR, truth_logRR),
+    converged      = c(lmm_n$converged, cmp$converged)
+  )
+}
+```
+
+### Sanity check at scale
+
+With all the machinery in place, let me check that all four methods recover the truth when the experiment is generously sized: 200 animals × 20 fields × 500 cells, true effect 1.5×, statistical paradise.
+
+```{r ideal-fit}
+#| label: tbl-ideal
+#| tbl-cap: "Common-scale results on the ideal demo dataset (200 animals × 20 fields × 500 cells, true effect 1.5×). All four methods detect the effect emphatically and recover the truth."
+
+res_ideal <- bind_rows(
+  fit_no_re(demo, change = 1.5, p0 = 0.10) |> mutate(pipeline = "Animal-level"),
+  fit_re(demo,    change = 1.5, p0 = 0.10) |> mutate(pipeline = "Field-level")
+)
+
+method_label <- c(t_test  = "Welch's t-test (\u0394)",
+                  cmp_glm = "CMP GLM",
+                  lmm     = "LMM (\u0394)",
+                  cmp_glmm = "CMP GLMM")
+
+res_ideal |>
+  transmute(
+    Pipeline   = pipeline,
+    Method     = method_label[method],
+    `log RR`   = round(estimate_logRR, 4),
+    `95% CI`   = sprintf("[%.4f, %.4f]", CI_lo_logRR, CI_hi_logRR),
+    `% change` = sprintf("%+.1f%%", 100 * (exp(estimate_logRR) - 1)),
+    `% CI`     = sprintf("[%+.1f%%, %+.1f%%]",
+                         100 * (exp(CI_lo_logRR) - 1),
+                         100 * (exp(CI_hi_logRR) - 1)),
+    `p-value`  = vapply(pvalue, fmt_p, character(1)),
+    Truth      = round(log(1.5), 4)
+  ) |>
+  kable()
+```
+
+All four methods agree to four decimal places: each recovers the *sample* log-RR of this particular dataset (≈ 0.4165), which sits about 0.4 standard errors above the *true* log-RR of $\log(1.5) \approx 0.4055$. With $n = 200$ animals per group, the sampling SE of the log-RR estimate is ~0.024 — so a deviation of ±0.01 from truth in any one realization is exactly what we expect. Truth is inside every 95% CI, every p-value is astronomical, and the four methods give numerically indistinguishable answers. At this sample size, the choice of method doesn't matter; only the data does.
+
+But no real experiment has 200 animals. The interesting question is what happens in the messier universe biologists actually work in.
+
+## A universe of experiments
+
+So the ideal case is settled: all four methods work fine when the experiment is large enough. The interesting question is the real-world case, where it usually isn't.
+
+Real proliferation studies come from biological material that's expensive and ethically constrained. Six animals per group is rich. Four is common, three is typical. Field counts vary with tissue and stain, between-animal variability changes with the system, and every lab's pipeline has its own quirks.
+
+The honest question is not "do these methods work?" With enough data they all do. The honest question is: across the messy, resource-limited, variable experiments biologists actually run, **how do they behave?**
+
+I want a *surface*, not a point estimate: each method's Type-I, power, and CI precision as continuous functions of the six knobs that define a real experiment. The approach: define the design space, sample it with **Latin hypercube sampling**, run hundreds of simulations at each sampled point with all four fitters, and smooth the noisy per-point estimates with **Gaussian process** emulators. The GP is what turns 300 noisy point estimates into a continuous surface I can query anywhere in the design space, with calibrated uncertainty in regions where designs are sparse. Once the emulators are in place, Sobol decomposition lets me ask which knobs each method is actually responding to.
+
+**Two parallel campaigns.** The **null campaign** fixes `change = 1` and varies the other five knobs; from it I get Type-I error per design point, with 500 simulations per design (Type-I is the small probability we most need to pin down precisely). The **main campaign** varies all six knobs and uses 200 simulations per design; from it I get raw power and CI width. Splitting them this way also keeps the Type-I estimate from contaminating the power estimate. Each campaign runs for both pipelines, so four campaigns total.
+
+### Designing the LHS sample
+
+Each knob is sampled the way its physical meaning suggests. Knobs with multiplicative biology — effect size `change`, baseline rate `p0`, cells per field `m`, dispersion `ν` — are sampled **log-uniformly** because a change from 0.03 to 0.06 is the same biological story as one from 0.20 to 0.40 (both are doublings, not "+0.03" or "+0.20"). Sampling these uniformly on the linear scale would over-represent the large end of each range, where small absolute differences become biologically meaningless. The between-animal CV is sampled **uniformly on the linear scale**, since it's already a ratio that doesn't need a further log. `n_animals` is sampled **uniformly on a discrete set** {3, 4, 5, 6, 7, 8, 10, 12} that covers the realistic range with denser coverage at small n where method differences matter most.
+
+```{r lhs-pairs, fig.width=8.5, fig.height=8.5}
+#| label: fig-lhs-pairs
+#| fig-cap: "300-point Latin hypercube design across all six knobs. Diagonal: marginal distribution per knob, with log-spaced bins for the log-sampled axes and one bin per integer for n_animals. Lower triangle: every two-way scatter, with the x- and y-axes set to log scale on the log-sampled variables. Uniform marginal coverage shows as flat histograms on the diagonal; the space-filling property of LHS shows as evenly-spread point clouds in every scatter. I added jitter to `n_animals` for visualization purposes"
+
+suppressPackageStartupMessages({
+  library(lhs)
+  library(GGally)
+})
+
+set.seed(42)
+N_DEMO <- 300
+u_demo <- randomLHS(N_DEMO, k = 6)
+
+design_demo <- data.frame(
+  change    = loguni(u_demo[, 1], 1.0, 2.0),
+  p0        = loguni(u_demo[, 2], 0.03, 0.40),
+  CV        = u_demo[, 3] * 0.35,
+  n_animals = c(3, 4, 5, 6, 7, 8, 10, 12)[floor(u_demo[, 4] * 8) + 1],
+  m         = round(loguni(u_demo[, 5], 50, 800)),
+  nu        = loguni(u_demo[, 6], 0.25, 4.0)
+)
+
+log_vars <- c("change", "p0", "m", "nu")
+varnames <- names(design_demo)
+
+# Lower triangle: scatter with jitter only on the n_animals axis (so the
+# eight discrete levels don't collapse into hard vertical stripes).
+lower_panel <- function(data, mapping, ...) {
+  x_var <- rlang::as_label(mapping$x)
+  y_var <- rlang::as_label(mapping$y)
+  jx <- if (x_var == "n_animals") 0.25 else 0
+  jy <- if (y_var == "n_animals") 0.25 else 0
+  ggplot(data, mapping) +
+    geom_point(position = position_jitter(width = jx, height = jy, seed = 1),
+               alpha = 0.5, size = 0.6, color = "#4A7FB8")
+}
+
+# Diagonal: histogram with bins matched to each variable's sampling scheme.
+# Log-spaced bins for log-sampled vars → uniform sample shows flat. Integer
+# bins for n_animals so each discrete level is its own bar.
+diag_panel <- function(data, mapping, ...) {
+  x_var <- rlang::as_label(mapping$x)
+  vals  <- data[[x_var]]
+  brks  <- if (x_var %in% log_vars) {
+    10^seq(log10(min(vals)), log10(max(vals)), length.out = 22)
+  } else if (x_var == "n_animals") {
+    seq(2.5, 12.5, by = 1)
+  } else {
+    seq(min(vals), max(vals), length.out = 22)
+  }
+  ggplot(data, mapping) +
+    geom_histogram(breaks = brks, fill = "#4A7FB8", alpha = 0.85,
+                   color = "white", linewidth = 0.2)
+}
+
+p <- ggpairs(
+  design_demo,
+  columns = varnames,
+  lower   = list(continuous = lower_panel),
+  diag    = list(continuous = diag_panel),
+  upper   = list(continuous = "blank"),
+  axisLabels = "show"
+) +
+  theme_bw(base_size = 9) +
+  theme(panel.grid.minor = element_blank(),
+        strip.background = element_rect(fill = "grey95"),
+        strip.text = element_text(size = 9))
+
+# Apply log scales to panels whose underlying variable is log-sampled.
+for (i in seq_along(varnames)) {
+  for (j in seq_along(varnames)) {
+    sub <- p[i, j]
+    if (varnames[j] %in% log_vars) sub <- sub + scale_x_log10()
+    if (i != j && varnames[i] %in% log_vars) sub <- sub + scale_y_log10()
+    p[i, j] <- sub
+  }
+}
+
+p
+```
+
+### Reproducing the pipeline
+
+The whole pipeline — four LHS campaigns, 12 GP emulators, Sobol indices on six of them — takes several hours of compute on a laptop, so I don't re-run it during render. **Two options for the reader:** download the precomputed `.rds` bundles (skip to the loading chunk below), or run the three scripts below to rebuild everything from scratch. The three chunks are self-contained — concatenate them into a single `.R` file in order and source it. They produce nine `.rds` bundles in the working directory; the rest of the post loads from those.
+
+```{r script-campaigns}
+#| label: script-campaigns
+#| eval: false
+#| code-fold: true
+#| code-summary: "Script 1 — build the four LHS campaigns (several hours)"
+
+# ============================================================================
+# Script 1: build LHS campaigns
+# Produces: lhs_null_campaign.rds, lhs_campaign.rds,
+#           lhs_null_campaign_re.rds, lhs_campaign_re.rds
+# ============================================================================
+
+suppressPackageStartupMessages({
+  library(dplyr); library(parallel); library(lhs)
+  library(COMMultReg)                    # r_cmb, e_cmb
+  library(glmmTMB); library(emmeans)
+  library(lme4); library(lmerTest)
+})
+
+# ---- Data generator --------------------------------------------------------
+
+p_from_rate <- function(target_rate, m, nu) {
+  target_rate <- pmax(pmin(target_rate, 0.999), 0.001)
+  if (abs(nu - 1) < 1e-10) return(target_rate)
+  tryCatch(
+    uniroot(function(p) e_cmb(m, p, nu) / m - target_rate,
+            lower = 1e-6, upper = 1 - 1e-6, tol = 1e-8)$root,
+    error = function(e) target_rate
+  )
+}
+
+draw_animal_rates <- function(mu, CV, n) {
+  if (CV <= 0) return(rep(mu, n))
+  sigma2 <- (mu * CV)^2
+  if (sigma2 >= mu * (1 - mu)) {
+    stop(sprintf("Beta infeasible: mu=%.3g with CV=%.3g requires CV < %.3g",
+                 mu, CV, sqrt((1 - mu) / mu)))
+  }
+  conc <- mu * (1 - mu) / sigma2 - 1
+  rbeta(n, shape1 = mu * conc, shape2 = (1 - mu) * conc)
+}
+
+simulate_experiment <- function(p0 = 0.05, change = 1.3, CV = 0.1, nu = 1.0,
+                                n_animals = 6, n_replicates = 3, m = 500) {
+  wt_rates <- draw_animal_rates(p0,          CV, n_animals)
+  ko_rates <- draw_animal_rates(p0 * change, CV, n_animals)
+  wt_p <- vapply(wt_rates, p_from_rate, numeric(1), m = m, nu = nu)
+  ko_p <- vapply(ko_rates, p_from_rate, numeric(1), m = m, nu = nu)
+  wt_counts <- unlist(lapply(wt_p, function(p)
+    replicate(n_replicates, r_cmb(1, m, p, nu))))
+  ko_counts <- unlist(lapply(ko_p, function(p)
+    replicate(n_replicates, r_cmb(1, m, p, nu))))
+  EmbryoID <- c(rep(paste0("ctrl", seq_len(n_animals)), each = n_replicates),
+                rep(paste0("cko",  seq_len(n_animals)), each = n_replicates))
+  data.frame(
+    Y        = as.integer(c(wt_counts, ko_counts)),
+    N        = m,
+    Group    = factor(c(rep("ctrl", n_animals * n_replicates),
+                        rep("cko",  n_animals * n_replicates)),
+                      levels = c("ctrl", "cko")),
+    EmbryoID = factor(EmbryoID)
+  )
+}
+
+# ---- Fitters ---------------------------------------------------------------
+
+fit_no_re <- function(data, change, p0) {
+  truth_logRR <- log(change)
+  per_animal <- data |>
+    group_by(EmbryoID, Group) |>
+    summarise(Y_tot = sum(Y), N_tot = sum(N), ratio = sum(Y) / sum(N),
+              .groups = "drop")
+
+  tt <- tryCatch({
+    t <- t.test(ratio ~ Group, data = per_animal, var.equal = FALSE)
+    list(pvalue = unname(t$p.value), df = unname(t$parameter),
+         CI_lo = -t$conf.int[2], CI_hi = -t$conf.int[1], converged = TRUE)
+  }, error = function(e) list(pvalue = NA_real_, df = NA_real_,
+                              CI_lo = NA_real_, CI_hi = NA_real_, converged = FALSE))
+  df_use <- if (is.na(tt$df)) Inf else tt$df
+
+  tt_logRR <- tryCatch({
+    grp <- per_animal |> group_by(Group) |>
+      summarise(m = mean(ratio), s = sd(ratio) / sqrt(n()), .groups = "drop")
+    mc <- grp$m[grp$Group == "ctrl"]; mk <- grp$m[grp$Group == "cko"]
+    sc <- grp$s[grp$Group == "ctrl"]; sk <- grp$s[grp$Group == "cko"]
+    if (mc <= 0 || mk <= 0) stop("non-positive group mean")
+    est <- log(mk / mc); se <- sqrt((sk/mk)^2 + (sc/mc)^2)
+    tcrit <- qt(0.975, df_use)
+    list(estimate = est, CI_lo = est - tcrit*se, CI_hi = est + tcrit*se)
+  }, error = function(e) list(estimate = NA_real_, CI_lo = NA_real_, CI_hi = NA_real_))
+
+  cmp <- tryCatch({
+    fit <- suppressWarnings(glmmTMB(Y_tot ~ Group + offset(log(N_tot)),
+                                    family = compois(), data = per_animal))
+    ok <- !is.null(fit$fit$convergence) && fit$fit$convergence == 0 &&
+          !is.null(fit$sdr) && isTRUE(fit$sdr$pdHess)
+    con <- contrast(emmeans(fit, ~ Group, offset = 0), "revpairwise", df = df_use)
+    cs <- as.data.frame(summary(con)); ci <- as.data.frame(confint(con))
+    list(pvalue = cs$p.value[1], estimate = cs$estimate[1],
+         CI_lo = ci$lower.CL[1], CI_hi = ci$upper.CL[1], converged = ok)
+  }, error = function(e) list(pvalue = NA_real_, estimate = NA_real_,
+                              CI_lo = NA_real_, CI_hi = NA_real_, converged = FALSE))
+
+  data.frame(
+    method         = c("t_test", "cmp_glm"),
+    pvalue         = c(tt$pvalue, cmp$pvalue),
+    estimate_logRR = c(tt_logRR$estimate, cmp$estimate),
+    CI_lo_logRR    = c(tt_logRR$CI_lo, cmp$CI_lo),
+    CI_hi_logRR    = c(tt_logRR$CI_hi, cmp$CI_hi),
+    width_logRR    = c(tt_logRR$CI_hi - tt_logRR$CI_lo,
+                       cmp$CI_hi    - cmp$CI_lo),
+    truth_logRR    = c(truth_logRR, truth_logRR),
+    converged      = c(tt$converged, cmp$converged)
+  )
+}
+
+fit_re <- function(data, change, p0) {
+  truth_logRR <- log(change)
+  data$rate <- data$Y / data$N
+
+  lmm_n <- tryCatch({
+    fit <- suppressMessages(lmer(rate ~ Group + (1 | EmbryoID), data = data))
+    con <- contrast(emmeans(fit, ~ Group), "revpairwise")
+    cs <- as.data.frame(summary(con)); ci <- as.data.frame(confint(con))
+    list(fit = fit, pvalue = cs$p.value[1], df = cs$df[1],
+         estimate = cs$estimate[1], CI_lo = ci$lower.CL[1], CI_hi = ci$upper.CL[1],
+         converged = TRUE)
+  }, error = function(e) list(fit = NULL, pvalue = NA_real_, df = NA_real_,
+                              estimate = NA_real_, CI_lo = NA_real_,
+                              CI_hi = NA_real_, converged = FALSE))
+  df_use <- if (is.na(lmm_n$df)) Inf else lmm_n$df
+
+  lmm_l <- tryCatch({
+    if (is.null(lmm_n$fit)) stop("no LMM")
+    es <- as.data.frame(summary(emmeans(lmm_n$fit, ~ Group)))
+    mc <- es$emmean[es$Group == "ctrl"]; mk <- es$emmean[es$Group == "cko"]
+    sc <- es$SE[es$Group == "ctrl"];     sk <- es$SE[es$Group == "cko"]
+    if (mc <= 0 || mk <= 0) stop("non-positive group mean")
+    est <- log(mk / mc); se <- sqrt((sk/mk)^2 + (sc/mc)^2)
+    tcrit <- qt(0.975, df_use)
+    list(estimate = est, CI_lo = est - tcrit*se, CI_hi = est + tcrit*se)
+  }, error = function(e) list(estimate = NA_real_, CI_lo = NA_real_, CI_hi = NA_real_))
+
+  cmp <- tryCatch({
+    fit <- suppressWarnings(glmmTMB(Y ~ Group + offset(log(N)) + (1 | EmbryoID),
+                                    family = compois(), data = data))
+    ok <- !is.null(fit$fit$convergence) && fit$fit$convergence == 0 &&
+          !is.null(fit$sdr) && isTRUE(fit$sdr$pdHess)
+    con <- contrast(emmeans(fit, ~ Group, offset = 0), "revpairwise", df = df_use)
+    cs <- as.data.frame(summary(con)); ci <- as.data.frame(confint(con))
+    list(pvalue = cs$p.value[1], estimate = cs$estimate[1],
+         CI_lo = ci$lower.CL[1], CI_hi = ci$upper.CL[1], converged = ok)
+  }, error = function(e) list(pvalue = NA_real_, estimate = NA_real_,
+                              CI_lo = NA_real_, CI_hi = NA_real_, converged = FALSE))
+
+  data.frame(
+    method         = c("lmm", "cmp_glmm"),
+    pvalue         = c(lmm_n$pvalue, cmp$pvalue),
+    df_used        = c(lmm_n$df, df_use),
+    estimate_logRR = c(lmm_l$estimate, cmp$estimate),
+    CI_lo_logRR    = c(lmm_l$CI_lo, cmp$CI_lo),
+    CI_hi_logRR    = c(lmm_l$CI_hi, cmp$CI_hi),
+    width_logRR    = c(lmm_l$CI_hi - lmm_l$CI_lo, cmp$CI_hi - cmp$CI_lo),
+    truth_logRR    = c(truth_logRR, truth_logRR),
+    converged      = c(lmm_n$converged, cmp$converged)
+  )
+}
+
+# ---- LHS design ------------------------------------------------------------
+
+loguni <- function(u, lo, hi) exp(log(lo) + u * (log(hi) - log(lo)))
+
+set.seed(42)
+N_DESIGNS <- 300
+u <- randomLHS(N_DESIGNS, k = 6)
+
+design_main <- data.frame(
+  point_id     = seq_len(N_DESIGNS),
+  change       = loguni(u[, 1], 1.0, 2.0),
+  p0           = loguni(u[, 2], 0.03, 0.40),
+  CV           = u[, 3] * 0.35,
+  n_animals    = c(3, 4, 5, 6, 7, 8, 10, 12)[floor(u[, 4] * 8) + 1],
+  m            = round(loguni(u[, 5], 50, 800)),
+  nu           = loguni(u[, 6], 0.25, 4.0),
+  n_replicates = 3
+)
+design_null <- transform(design_main, change = 1)
+
+# ---- Per-point runner (parallel via mclapply) ------------------------------
+# Windows users: replace mclapply with parLapply or set mc.cores = 1.
+
+run_one_point <- function(pars, n_sim, fitter, n_cores = 4) {
+  sim_pars <- as.list(pars[, c("p0", "change", "CV", "nu",
+                               "n_animals", "n_replicates", "m")])
+  one_sim <- function(i) {
+    d <- do.call(simulate_experiment, sim_pars)
+    fitter(d, change = pars$change, p0 = pars$p0)
+  }
+  raw <- mclapply(seq_len(n_sim), one_sim,
+                  mc.cores = n_cores, mc.preschedule = FALSE)
+  do.call(rbind, raw)
+}
+
+summarise_point <- function(fits, design_row) {
+  per_method <- fits |>
+    filter(converged) |>
+    group_by(method) |>
+    summarise(
+      n_sim        = n(),
+      type1        = mean(pvalue < 0.05),    # at the null
+      power        = mean(pvalue < 0.05),    # at the alternative (same calc)
+      median_width = median(width_logRR, na.rm = TRUE),
+      .groups      = "drop"
+    )
+  per_method$point_id <- design_row$point_id
+  design_cols <- design_row[, c("change", "p0", "CV", "n_animals", "m", "nu")]
+  cbind(per_method, design_cols, row.names = NULL)
+}
+
+run_campaign <- function(design, n_sim, fitter, label, n_cores = 4) {
+  message(sprintf("[%s] %d designs x %d sims (n_cores = %d)",
+                  label, nrow(design), n_sim, n_cores))
+  rows <- lapply(seq_len(nrow(design)), function(i) {
+    if (i %% 25 == 0) message(sprintf("  point %d / %d", i, nrow(design)))
+    fits <- run_one_point(design[i, ], n_sim, fitter, n_cores = n_cores)
+    summarise_point(fits, design[i, ])
+  })
+  bind_rows(rows)
+}
+
+# ---- Run the four campaigns ------------------------------------------------
+
+camp_null_no_re <- run_campaign(design_null, n_sim = 500, fit_no_re, "null no-RE")
+camp_main_no_re <- run_campaign(design_main, n_sim = 200, fit_no_re, "main no-RE")
+camp_null_re    <- run_campaign(design_null, n_sim = 500, fit_re,    "null RE")
+camp_main_re    <- run_campaign(design_main, n_sim = 200, fit_re,    "main RE")
+
+# ---- Save ------------------------------------------------------------------
+
+saveRDS(list(summary = camp_null_no_re, design = design_null), "lhs_null_campaign.rds")
+saveRDS(list(summary = camp_main_no_re, design = design_main), "lhs_campaign.rds")
+saveRDS(list(summary = camp_null_re,    design = design_null), "lhs_null_campaign_re.rds")
+saveRDS(list(summary = camp_main_re,    design = design_main), "lhs_campaign_re.rds")
+```
+
+```{r script-emulators}
+#| label: script-emulators
+#| eval: false
+#| code-fold: true
+#| code-summary: "Script 2 — fit 12 GP emulators with LOOCV (tens of minutes)"
+
+# ============================================================================
+# Script 2: fit 12 GP emulators with leave-one-out cross-validation
+# Reads:  lhs_*_campaign*.rds
+# Writes: gp_null_emulators.rds, gp_emulators.rds, gp_emulators_re.rds
+# ============================================================================
+
+suppressPackageStartupMessages({
+  library(dplyr); library(hetGP)
+})
+
+# ---- Helpers ---------------------------------------------------------------
+
+# Smoothed logit so rejection rates of 0 or 1 don't blow up the GP fit.
+logit_p <- function(p, n) {
+  p_adj <- (p * n + 0.5) / (n + 1)
+  log(p_adj / (1 - p_adj))
+}
+
+transform_inputs_null <- function(df) {
+  data.frame(lnu = log(df$nu), CV = df$CV,
+             ln_animals = log(df$n_animals), lm = log(df$m), lp0 = log(df$p0))
+}
+transform_inputs_main <- function(df) {
+  data.frame(lchange = log(df$change), lnu = log(df$nu), CV = df$CV,
+             ln_animals = log(df$n_animals), lm = log(df$m), lp0 = log(df$p0))
+}
+
+# Fit one homoscedastic GP with Matern 5/2 + ARD, then leave-one-out CV.
+fit_emulator <- function(df, target, transform_fn, ard_names, label) {
+  X_raw <- transform_fn(df)
+  x_min <- sapply(X_raw, min); x_max <- sapply(X_raw, max)
+  X <- as.matrix(mapply(function(c, lo, hi) (c - lo) / (hi - lo),
+                        X_raw, x_min, x_max, SIMPLIFY = FALSE))
+  fit <- mleHomGP(X = X, Z = target, covtype = "Matern5_2")
+
+  n <- nrow(X); loo_mu <- numeric(n); loo_sd <- numeric(n)
+  for (i in seq_len(n)) {
+    fit_i <- mleHomGP(X = X[-i, , drop = FALSE], Z = target[-i],
+                      covtype = "Matern5_2")
+    p_i <- predict(fit_i, x = X[i, , drop = FALSE])
+    loo_mu[i] <- p_i$mean
+    loo_sd[i] <- sqrt(p_i$sd2 + p_i$nugs)
+  }
+  resid <- target - loo_mu
+
+  list(label = label, fit = fit,
+       ard   = setNames(as.numeric(fit$theta), ard_names),
+       x_min = x_min, x_max = x_max,
+       loo   = data.frame(y_obs = target, y_pred = loo_mu, y_sd = loo_sd),
+       metrics = list(rmse  = sqrt(mean(resid^2)),
+                      cov95 = mean(abs(resid) < 1.96 * loo_sd)))
+}
+
+ard_null <- c("lnu", "CV", "ln_animals", "lm", "lp0")
+ard_main <- c("lchange", "lnu", "CV", "ln_animals", "lm", "lp0")
+
+# ---- Load campaigns --------------------------------------------------------
+
+camp_null_no_re <- readRDS("lhs_null_campaign.rds")$summary
+camp_main_no_re <- readRDS("lhs_campaign.rds")$summary
+camp_null_re    <- readRDS("lhs_null_campaign_re.rds")$summary
+camp_main_re    <- readRDS("lhs_campaign_re.rds")$summary
+
+# ---- Drop low-convergence Pipeline B designs -------------------------------
+# CMP GLMM occasionally fails to converge at extreme corners of the design
+# space (very small n with very rare events). Drop designs where fewer than
+# half the simulations converged for at least one method.
+
+exclude_lowconv <- function(camp, min_n) {
+  camp |> group_by(point_id) |>
+    summarise(min_keep = min(n_sim), .groups = "drop") |>
+    filter(min_keep < min_n) |>
+    pull(point_id)
+}
+excluded <- list(
+  null = exclude_lowconv(camp_null_re, min_n = 250),  # 50% of 500
+  main = exclude_lowconv(camp_main_re, min_n = 100)   # 50% of 200
+)
+
+# ---- Pipeline A: Type-I ----------------------------------------------------
+
+tt_null  <- camp_null_no_re |> filter(method == "t_test")
+cmp_null <- camp_null_no_re |> filter(method == "cmp_glm")
+
+em_null_no_re <- list(
+  T1_tt  = fit_emulator(tt_null,  logit_p(tt_null$type1,  tt_null$n_sim),
+                        transform_inputs_null, ard_null, "Welch's t-test"),
+  T1_cmp = fit_emulator(cmp_null, logit_p(cmp_null$type1, cmp_null$n_sim),
+                        transform_inputs_null, ard_null, "CMP GLM")
+)
+
+# ---- Pipeline A: Power + Width ---------------------------------------------
+
+tt_main  <- camp_main_no_re |> filter(method == "t_test")
+cmp_main <- camp_main_no_re |> filter(method == "cmp_glm")
+
+em_main_no_re <- list(
+  power_tt  = fit_emulator(tt_main,  logit_p(tt_main$power,  tt_main$n_sim),
+                           transform_inputs_main, ard_main, "Welch's t-test"),
+  power_cmp = fit_emulator(cmp_main, logit_p(cmp_main$power, cmp_main$n_sim),
+                           transform_inputs_main, ard_main, "CMP GLM"),
+  width_tt  = fit_emulator(tt_main,  log(tt_main$median_width),
+                           transform_inputs_main, ard_main, "Welch's t-test"),
+  width_cmp = fit_emulator(cmp_main, log(cmp_main$median_width),
+                           transform_inputs_main, ard_main, "CMP GLM")
+)
+
+# ---- Pipeline B: Type-I ----------------------------------------------------
+
+lmm_null_re <- camp_null_re |> filter(method == "lmm",      !point_id %in% excluded$null)
+cmp_null_re <- camp_null_re |> filter(method == "cmp_glmm", !point_id %in% excluded$null)
+
+em_null_re <- list(
+  type1_lmm = fit_emulator(lmm_null_re, logit_p(lmm_null_re$type1, lmm_null_re$n_sim),
+                           transform_inputs_null, ard_null, "LMM"),
+  type1_cmp = fit_emulator(cmp_null_re, logit_p(cmp_null_re$type1, cmp_null_re$n_sim),
+                           transform_inputs_null, ard_null, "CMP GLMM")
+)
+
+# ---- Pipeline B: Power + Width ---------------------------------------------
+
+lmm_main_re <- camp_main_re |> filter(method == "lmm",      !point_id %in% excluded$main)
+cmp_main_re <- camp_main_re |> filter(method == "cmp_glmm", !point_id %in% excluded$main)
+
+em_power_re <- list(
+  power_lmm = fit_emulator(lmm_main_re, logit_p(lmm_main_re$power, lmm_main_re$n_sim),
+                           transform_inputs_main, ard_main, "LMM"),
+  power_cmp = fit_emulator(cmp_main_re, logit_p(cmp_main_re$power, cmp_main_re$n_sim),
+                           transform_inputs_main, ard_main, "CMP GLMM")
+)
+em_width_re <- list(
+  width_lmm = fit_emulator(lmm_main_re, log(lmm_main_re$median_width),
+                           transform_inputs_main, ard_main, "LMM"),
+  width_cmp = fit_emulator(cmp_main_re, log(cmp_main_re$median_width),
+                           transform_inputs_main, ard_main, "CMP GLMM")
+)
+
+# ---- Save ------------------------------------------------------------------
+
+saveRDS(list(emulators = em_null_no_re), "gp_null_emulators.rds")
+saveRDS(list(emulators = em_main_no_re), "gp_emulators.rds")
+saveRDS(list(em_null_re  = em_null_re,
+             em_power_re = em_power_re,
+             em_width_re = em_width_re,
+             excluded    = excluded),    "gp_emulators_re.rds")
+```
+
+```{r script-sobol}
+#| label: script-sobol
+#| eval: false
+#| code-fold: true
+#| code-summary: "Script 3 — Sobol first- and total-order indices (seconds)"
+
+# ============================================================================
+# Script 3: Sobol indices for power + width emulators (not Type-I)
+# Reads:  gp_emulators.rds, gp_emulators_re.rds
+# Writes: sobol_no_re_indices.rds, sobol_re_indices.rds
+# ============================================================================
+
+suppressPackageStartupMessages({
+  library(dplyr); library(hetGP); library(sensitivity)
+})
+
+em_main_no_re <- readRDS("gp_emulators.rds")$emulators
+em_re_bundle  <- readRDS("gp_emulators_re.rds")
+em_power_re   <- em_re_bundle$em_power_re
+em_width_re   <- em_re_bundle$em_width_re
+
+# Input ranges on the transformed (log) scale that the GPs were fit on.
+input_lo <- c(lchange = log(1.0),  lnu = log(0.25), CV = 0,
+              ln_animals = log(3), lm  = log(50),   lp0 = log(0.03))
+input_hi <- c(lchange = log(2.0),  lnu = log(4.0),  CV = 0.35,
+              ln_animals = log(12), lm = log(800),  lp0 = log(0.40))
+
+input_label_map <- c(lchange = "change", lnu = "\u03bd", CV = "CV",
+                     ln_animals = "n_animals", lm = "m", lp0 = "p0")
+input_levels    <- unname(input_label_map)
+target_levels   <- c("Type-I", "Power", "Width")
+
+# Saltelli sample on the 6-D box.
+N_SOBOL <- 1024
+set.seed(20260517)
+make_sample <- function(N)
+  as.data.frame(mapply(function(l, h) runif(N, l, h),
+                       input_lo, input_hi, SIMPLIFY = FALSE))
+X1 <- make_sample(N_SOBOL)
+X2 <- make_sample(N_SOBOL)
+
+# Wrap a fitted emulator as a function R^6 -> R that sobolSalt can call.
+make_predictor <- function(em) function(X) {
+  Xs <- as.matrix(mapply(function(c, l, h) (c - l) / (h - l),
+                         as.data.frame(X), em$x_min, em$x_max, SIMPLIFY = FALSE))
+  predict(em$fit, x = Xs)$mean
+}
+
+extract_sobol <- function(sob, target_lab, method_lab) {
+  s <- as.data.frame(sob$S); t <- as.data.frame(sob$T)
+  data.frame(
+    input  = factor(input_label_map[names(input_lo)], levels = input_levels),
+    S      = s$original, S_lo = s$`min. c.i.`, S_hi = s$`max. c.i.`,
+    T      = t$original, T_lo = t$`min. c.i.`, T_hi = t$`max. c.i.`,
+    target = factor(target_lab, levels = target_levels),
+    method = method_lab
+  )
+}
+
+run_sobol <- function(em, target_lab, method_lab) {
+  sob <- sobolSalt(model = make_predictor(em), X1 = X1, X2 = X2,
+                   scheme = "B", nboot = 200, conf = 0.95)
+  extract_sobol(sob, target_lab, method_lab)
+}
+
+sobol_no_re <- bind_rows(
+  run_sobol(em_main_no_re$power_tt,  "Power", "Welch's t-test"),
+  run_sobol(em_main_no_re$power_cmp, "Power", "CMP GLM"),
+  run_sobol(em_main_no_re$width_tt,  "Width", "Welch's t-test"),
+  run_sobol(em_main_no_re$width_cmp, "Width", "CMP GLM")
+) |>
+  mutate(method = factor(method, levels = c("Welch's t-test", "CMP GLM")))
+
+sobol_re <- bind_rows(
+  run_sobol(em_power_re$power_lmm, "Power", "LMM"),
+  run_sobol(em_power_re$power_cmp, "Power", "CMP GLMM"),
+  run_sobol(em_width_re$width_lmm, "Width", "LMM"),
+  run_sobol(em_width_re$width_cmp, "Width", "CMP GLMM")
+) |>
+  mutate(method = factor(method, levels = c("LMM", "CMP GLMM")))
+
+saveRDS(sobol_no_re, "sobol_no_re_indices.rds")
+saveRDS(sobol_re,    "sobol_re_indices.rds")
+```
+
+### Loading the precomputed bundles
+
+This is what actually runs during render. If you ran the three scripts above, the `.rds` bundles are in your working directory. If not, the precomputed bundles are published alongside this post and can be downloaded directly: [`lhs_null_campaign.rds`](lhs_null_campaign.rds), [`lhs_campaign.rds`](lhs_campaign.rds), [`lhs_null_campaign_re.rds`](lhs_null_campaign_re.rds), [`lhs_campaign_re.rds`](lhs_campaign_re.rds), [`gp_null_emulators.rds`](gp_null_emulators.rds), [`gp_emulators.rds`](gp_emulators.rds), [`gp_emulators_re.rds`](gp_emulators_re.rds), [`sobol_no_re_indices.rds`](sobol_no_re_indices.rds), [`sobol_re_indices.rds`](sobol_re_indices.rds). Save them next to the .qmd. The chunk below loads all nine into the variables the rest of the post uses.
+
+```{r load-campaigns}
+#| label: load-campaigns
+#| code-fold: show
+
+# Raw LHS simulation campaigns (used for paired-difference and Type-I plots)
+camp_null_no_re <- readRDS("lhs_null_campaign.rds")
+camp_main_no_re <- readRDS("lhs_campaign.rds")
+null_summary_no_re <- camp_null_no_re$summary
+main_summary_no_re <- camp_main_no_re$summary
+
+camp_null_re <- readRDS("lhs_null_campaign_re.rds")
+camp_main_re <- readRDS("lhs_campaign_re.rds")
+null_summary_re <- camp_null_re$summary
+main_summary_re <- camp_main_re$summary
+
+# GP emulator bundles
+em_null_no_re <- readRDS("gp_null_emulators.rds")$emulators
+em_main_no_re <- readRDS("gp_emulators.rds")$emulators
+em_power_no_re <- list(power_tt  = em_main_no_re$power_tt,
+                       power_cmp = em_main_no_re$power_cmp)
+em_width_no_re <- list(width_tt  = em_main_no_re$width_tt,
+                       width_cmp = em_main_no_re$width_cmp)
+
+em_re_bundle <- readRDS("gp_emulators_re.rds")
+em_null_re   <- em_re_bundle$em_null_re
+em_power_re  <- em_re_bundle$em_power_re
+em_width_re  <- em_re_bundle$em_width_re
+excluded_re  <- em_re_bundle$excluded
+
+# Sobol indices
+sobol_no_re <- readRDS("sobol_no_re_indices.rds")
+sobol_re    <- readRDS("sobol_re_indices.rds")
+```
+
+```{r gp-machinery}
+#| label: gp-machinery
+#| code-fold: show
+
+# Input transforms: log on log-uniformly sampled axes, linear on CV.
+transform_inputs_null <- function(df) {
+  data.frame(lnu = log(df$nu), CV = df$CV,
+             ln_animals = log(df$n_animals), lm = log(df$m), lp0 = log(df$p0))
+}
+transform_inputs_main <- function(df) {
+  data.frame(lchange = log(df$change), lnu = log(df$nu), CV = df$CV,
+             ln_animals = log(df$n_animals), lm = log(df$m), lp0 = log(df$p0))
+}
+
+# Predict from a fitted emulator at new design points.
+predict_gp <- function(emulator, newdata_raw, transform_fn, link = "logit") {
+  X_raw <- transform_fn(newdata_raw)
+  X <- as.matrix(as.data.frame(mapply(
+    function(col, lo, hi) (col - lo) / (hi - lo),
+    X_raw, emulator$x_min, emulator$x_max, SIMPLIFY = FALSE)))
+  mu <- predict(emulator$fit, x = X)$mean
+  if (link == "logit")    1 / (1 + exp(-mu))    # back to probability
+  else if (link == "log") exp(mu)               # back to width
+  else                    mu                    # raw GP scale
+}
+
+# Chunked predict to keep memory bounded on large MC grids.
+chunk_predict <- function(emulator, df, transform_fn, link = "logit",
+                          chunk_size = 50000) {
+  n <- nrow(df); out <- numeric(n)
+  for (s in seq(1, n, by = chunk_size)) {
+    e <- min(s + chunk_size - 1, n)
+    out[s:e] <- predict_gp(emulator, df[s:e, , drop = FALSE], transform_fn, link)
+  }
+  out
+}
+
+# ----- Plotting helpers shared across pipelines -----
+
+# LOOCV residual diagnostic for any pair of emulators with $loo populated.
+plot_loo_residuals <- function(emulators, method_colors, y_label = NULL) {
+  method_levels <- vapply(emulators, function(e) e$label, character(1))
+
+  loo_df <- bind_rows(lapply(emulators, function(e) {
+    data.frame(Method  = e$label,
+               y_obs   = e$loo$y_obs,
+               y_pred  = e$loo$y_pred,
+               y_sd    = e$loo$y_sd,
+               resid   = e$loo$y_obs - e$loo$y_pred,
+               covered = abs(e$loo$y_obs - e$loo$y_pred) < 1.96 * e$loo$y_sd)
+  })) |>
+    mutate(Method = factor(Method, levels = method_levels)) |>
+    group_by(Method) |> arrange(y_obs) |>
+    mutate(idx = row_number()) |> ungroup()
+
+  cov_stats <- loo_df |> group_by(Method) |>
+    summarise(cov95 = mean(covered),
+              rmse  = sqrt(mean(resid^2)), .groups = "drop")
+  cov_label <- paste(sprintf("%s: 95%% cov = %.0f%%, RMSE = %.2f",
+                             cov_stats$Method, 100 * cov_stats$cov95, cov_stats$rmse),
+                     collapse = "  |  ")
+
+  ggplot(loo_df, aes(x = idx, y = resid, color = Method)) +
+    geom_hline(yintercept = 0, linetype = "dashed", color = "grey40") +
+    geom_errorbar(aes(ymin = resid - 1.96 * y_sd, ymax = resid + 1.96 * y_sd),
+                  alpha = 0.3, width = 0) +
+    geom_point(size = 1.1, alpha = 0.7) +
+    facet_wrap(~ Method, nrow = 1, scales = "free_x") +
+    scale_color_manual(values = method_colors, guide = "none") +
+    labs(title    = "LOOCV residuals",
+         subtitle = cov_label,
+         x        = "design point (sorted by observed value)",
+         y        = y_label %||% "observed \u2212 predicted") +
+    theme_bw(base_size = 11)
+}
+
+# Sobol first- and total-order indices for one or more targets.
+# `sobol_df` must have columns: input, S, S_lo, S_hi, T, T_lo, T_hi, target, method.
+plot_sobol <- function(sobol_df, method_colors, title = NULL) {
+  sobol_df <- sobol_df |>
+    droplevels() |>
+    mutate(method = factor(method, levels = names(method_colors)))
+
+  ggplot(sobol_df, aes(x = input, group = method)) +
+    geom_col(aes(y = T, fill = method),
+             position = position_dodge(0.75), width = 0.7, alpha = 0.35) +
+    geom_col(aes(y = S, fill = method),
+             position = position_dodge(0.75), width = 0.7) +
+    geom_errorbar(aes(ymin = T_lo, ymax = T_hi),
+                  position = position_dodge(0.75), width = 0.2,
+                  color = "grey30", alpha = 0.8) +
+    facet_wrap(~ target, nrow = 1) +
+    scale_fill_manual(values = method_colors, name = NULL) +
+    scale_y_continuous(limits = c(0, NA)) +
+    labs(title    = title,
+         subtitle = "Solid bars: first-order (main effect). Light bars: total-order (main + interactions). Error bars: 95% bootstrap CIs on total-order.",
+         x = NULL, y = "Sobol index") +
+    theme_bw(base_size = 11) +
+    theme(legend.position = "bottom",
+          axis.text.x = element_text(angle = 30, hjust = 1))
+}
+
+# Coalesce operator used by plot_loo_residuals.
+`%||%` <- function(a, b) if (!is.null(a)) a else b
+```
+
+# Results
+
+The 300-design universe is built; the 12 emulators are fit. Each metric (Type-I error, statistical power, CI precision) gets its own section below, comparing all four methods side by side. Diagnostics first (does the emulator we're trusting actually fit the data?), then the substantive result, then a brief discussion of what drives method behaviour.
+
+## Type-I error
+
+A method that rejects too often at the null is not more powerful — it's crying wolf more often. We need to know each method is honest before comparing them on anything else.
+
+The null campaign fixes `change = 1` and varies the other five knobs. 300 LHS points × 500 simulations × 4 fitters → 600,000 fits, summarised to a Type-I rate per (design point, method). Each rate feeds a GP emulator, giving four Type-I surfaces I can interrogate anywhere in the design space.
+
+### How good are the emulators?
+
+Before reading anything off the Type-I surfaces, the standard check: leave-one-out cross-validation. For each design point I refit the GP without it, predict at the held-out location, and compare prediction to observation. Residuals should cluster around zero with the ±1.96 SD predictive intervals crossing zero ~95% of the time. RMSE on the logit scale and 95% coverage are reported in the subtitle of each panel.
+
+```{r loo-null-all, fig.height=6}
+#| label: fig-loo-null-all
+#| fig-cap: "LOOCV residuals for the four Type-I emulators on the logit scale. Top row: animal-level methods (Welch's t-test, CMP GLM). Bottom row: field-level methods (LMM, CMP GLMM). Coverage near nominal 95% with residuals centred on zero is what we want."
+
+pA <- plot_loo_residuals(list(em_null_no_re$T1_tt, em_null_no_re$T1_cmp),
+                         method_colors_no_re,
+                         y_label = "observed \u2212 predicted logit(Type-I)")
+pB <- plot_loo_residuals(list(em_null_re$type1_lmm, em_null_re$type1_cmp),
+                         method_colors_re,
+                         y_label = "observed \u2212 predicted logit(Type-I)")
+pA / pB
+```
+
+All four emulators are well-calibrated — coverage close to 95%, residuals centred. The Type-I surfaces are trustworthy.
+
+### Does each method hit the nominal rate?
+
+To judge calibration I use **Bradley's [2.5%, 7.5%] band of liberal robustness for a nominal-5% test** (Bradley, 1978). The idea: a Type-I rate of exactly 5% is a fantasy at finite sample sizes; what we want is a method whose empirical Type-I across realistic designs falls inside Bradley's band. Anything outside is either conservative (wasting power, the smaller problem) or anti-conservative (false positives, the larger one).
+
+```{r type1-distributions-all, fig.height=6}
+#| label: fig-type1-all
+#| fig-cap: "Empirical Type-I across 300 null designs, all four methods. Dashed line: nominal 5%. Dotted lines: Bradley's [2.5%, 7.5%] band. Coloured line: median across the 300 designs."
+
+bradley_panel <- function(summary_df, method_filter, method_recode, colors) {
+  d <- summary_df |>
+    filter(method %in% method_filter) |>
+    mutate(Method = factor(recode(method, !!!method_recode),
+                           levels = unname(method_recode)))
+  meds <- d |> group_by(Method) |> summarise(med = median(type1), .groups = "drop")
+
+  ggplot(d, aes(x = type1, fill = Method)) +
+    geom_histogram(bins = 25, alpha = 0.85, color = "white", linewidth = 0.2) +
+    geom_vline(xintercept = 0.05, linetype = "dashed", color = "grey30") +
+    geom_vline(xintercept = c(0.025, 0.075), linetype = "dotted", color = "grey50") +
+    geom_vline(data = meds, aes(xintercept = med, color = Method),
+               linewidth = 0.9, show.legend = FALSE) +
+    facet_wrap(~ Method, nrow = 1) +
+    scale_fill_manual(values = colors, guide = "none") +
+    scale_color_manual(values = colors, guide = "none") +
+    scale_x_continuous(labels = percent_format(accuracy = 1), limits = c(0, 0.11)) +
+    labs(x = "Type-I error rate", y = "design points") +
+    theme_bw(base_size = 11)
+}
+
+pA <- bradley_panel(null_summary_no_re,
+                    c("t_test", "cmp_glm"),
+                    c(t_test = "Welch's t-test", cmp_glm = "CMP GLM"),
+                    method_colors_no_re) +
+  labs(title = "Animal-level (no random effects)")
+
+pB <- bradley_panel(null_summary_re |> filter(!point_id %in% excluded_re$null),
+                    c("lmm", "cmp_glmm"),
+                    c(lmm = "LMM", cmp_glmm = "CMP GLMM"),
+                    method_colors_re) +
+  labs(title = "Field-level (with random effects)",
+       subtitle = "Dashed: nominal 5%. Dotted: Bradley's [2.5%, 7.5%] band. Coloured: median.")
+
+pA / pB
+```
+
+A few things to read off this. All four methods sit mostly inside Bradley's band — none is structurally broken. But they're not all in the same place inside it. **Welch's t-test** is mildly conservative (median ~4.4%); **CMP GLM** is mildly anti-conservative (median ~6%); the field-level pair sits in between. The medians are within ~1–2 pp of each other but consistently on different sides of nominal 5%.
+
+### Why this matters for power: size adjustment
+
+Here's the catch. If one method rejects 6% of the time at the null and another rejects 4%, then at the alternative, the first method's "power" includes some apparent advantage that's really just inherited Type-I inflation. To compare power fairly, I size-adjust each method's raw power using the first-order Lloyd correction (Lloyd, 2005):
+
+$$\text{adjusted power} \approx \text{raw power} - (\text{Type-I rate} - 0.05)$$
+
+This resets every method's starting line to 5% and asks: at a *matched* nominal level, who detects the effect more often? It's not a perfect adjustment (it ignores higher-order distributional differences), but at the small Type-I gaps we see here it's enough to make the comparison honest. All power numbers from here on are size-adjusted.
+
+## Statistical power
+
+The main campaign varies all six knobs including effect size. 300 LHS points × 200 simulations × 4 fitters → 240,000 fits, summarised to a raw rejection rate per (design point, method). Subtracting the matched Type-I excess turns these into size-adjusted power surfaces.
+
+### Power emulator diagnostics
+
+```{r loo-power-all, fig.height=6}
+#| label: fig-loo-power-all
+#| fig-cap: "LOOCV residuals for the four power emulators on the logit scale. Top row: animal-level. Bottom row: field-level. Coverage near 95% confirms the GP surfaces are reliable."
+
+pA <- plot_loo_residuals(list(em_main_no_re$power_tt, em_main_no_re$power_cmp),
+                         method_colors_no_re,
+                         y_label = "observed \u2212 predicted logit(power)")
+pB <- plot_loo_residuals(list(em_power_re$power_lmm, em_power_re$power_cmp),
+                         method_colors_re,
+                         y_label = "observed \u2212 predicted logit(power)")
+pA / pB
+```
+
+### What drives power: Sobol decomposition
+
+A fitted GP is more than a smoother; it's a deterministic function I can probe. **Sobol first- and total-order indices** decompose the GP's output variance into the share attributable to each input. The first-order $S_i$ is input $i$'s contribution on its own; the total-order $S_{T_i}$ adds in interactions with every other input. The gap between them is how much of an input's influence flows through interactions.
+
+```{r sobol-power-all, fig.height=8}
+#| label: fig-sobol-power-all
+#| fig-cap: "Sobol first- and total-order indices for the four power emulators. Solid bars: first-order (main effect). Light bars: total-order (main + interactions). Error bars are 95% bootstrap CIs on the total-order indices."
+
+pA <- plot_sobol(sobol_no_re |> filter(target == "Power"), method_colors_no_re,
+                 title = "Animal-level (no random effects)")
+pB <- plot_sobol(sobol_re    |> filter(target == "Power"), method_colors_re,
+                 title = "Field-level (with random effects)")
+pA / pB
+```
+
+Across all four methods the picture is nearly identical. Power is dominated by `change` (~55–60% of variance), with `CV` second (~20–25%) and `n_animals` a clear but smaller third (~10–13%). The remaining knobs — `ν`, `m`, `p0` — contribute under 5% each. The light bars sit modestly above the solid ones on `change` and `CV`, indicating some interaction structure, but no single pair dominates.
+
+All four methods agree on what *drives* power; differences between them will live in how strongly each responds at a given design. And the three top drivers play very different roles: `change` is the effect we're trying to *detect*, `CV` is a by-product of the biology/methodology, and `n_animals` is the one knob the experimenter actually sets.
+
+### Where does the count likelihood actually win?
+
+GP emulation gives us a clean way to query power across the entire experimental universe. The fitted GPs aren't just smoothers; they're cheap surrogate models of each method's behaviour at every point in the 6-dimensional design space. Once we have them, asking "what is method X's power at this design?" becomes a function call rather than a fresh simulation campaign.
+
+Apart from `change`, the Sobol analysis identified `n_animals` and `CV` as the two next most important drivers of power. So a natural question to ask the emulators is: at a fixed, medium-sized effect (say a 30% increase in proliferation, `change = 1.3`), how does each method's power vary as a function of `n_animals` and `CV`?
+
+To answer it cleanly we need to do something about the remaining three knobs: `ν`, `m`, and `p0`. We could just fix them at one arbitrary combination, but the answer would depend on the choice. Better is to *marginalize* over them: for each cell on the `(n_animals, CV)` grid, draw a Monte Carlo sample of `(ν, m, p0)` from their realistic distributions, predict size-adjusted power at every sampled point with the emulator, and average. Each heatmap cell is then *expected* power across realistic variation in the nuisance dimensions, not a slice at one arbitrary combination. Tens of thousands of GP predictions cost seconds; running a fresh simulation campaign of the same density would cost days.
+
+The result, one heatmap per pipeline, on the same axes: animals per group on the x-axis, between-animal CV on the y-axis. Fill colour is the size-adjusted power difference (CMP minus Gaussian); the two contour lines mark each method's 80% power boundary.
+
+```{r money-power-no-re, fig.height=5.5}
+#| label: fig-money-power-no-re
+#| fig-cap: "Animal-level (no random effects). Size-adjusted power difference (CMP GLM − Welch's t-test) at change = 1.3, marginalized over (ν, m, p0). Lines: 80% power contour for each method individually."
+
+set.seed(1)
+M       <- 1500
+n_grid  <- seq(3, 12, by = 0.5)
+cv_grid <- seq(0, 0.35, length.out = 36)
+change_fixed <- 1.3
+
+mc_grid <- expand.grid(n_animals = n_grid, CV = cv_grid, mc = seq_len(M),
+                       KEEP.OUT.ATTRS = FALSE)
+mc_grid$change <- change_fixed
+mc_grid$nu     <- exp(runif(nrow(mc_grid), log(0.25), log(4.0)))
+mc_grid$m      <- round(exp(runif(nrow(mc_grid), log(50), log(800))))
+mc_grid$p0     <- exp(runif(nrow(mc_grid), log(0.03), log(0.40)))
+
+mc_grid$p_tt_raw  <- chunk_predict(em_main_no_re$power_tt,  mc_grid, transform_inputs_main, "logit")
+mc_grid$p_cmp_raw <- chunk_predict(em_main_no_re$power_cmp, mc_grid, transform_inputs_main, "logit")
+mc_grid$t1_tt     <- chunk_predict(em_null_no_re$T1_tt,     mc_grid, transform_inputs_null, "logit")
+mc_grid$t1_cmp    <- chunk_predict(em_null_no_re$T1_cmp,    mc_grid, transform_inputs_null, "logit")
+
+mc_grid$p_tt_adj  <- mc_grid$p_tt_raw  - (mc_grid$t1_tt  - 0.05)
+mc_grid$p_cmp_adj <- mc_grid$p_cmp_raw - (mc_grid$t1_cmp - 0.05)
+
+agg_power_no_re <- mc_grid |>
+  group_by(n_animals, CV) |>
+  summarise(power_tt  = mean(p_tt_adj),
+            power_cmp = mean(p_cmp_adj),
+            delta_adj = mean(p_cmp_adj - p_tt_adj),
+            .groups = "drop")
+
+dmax_no <- max(abs(agg_power_no_re$delta_adj))
+
+ggplot(agg_power_no_re, aes(x = n_animals, y = CV)) +
+  geom_raster(aes(fill = delta_adj), interpolate = TRUE) +
+  geom_contour(aes(z = power_tt,  color = "Welch's t-test"), linewidth = 1.0, breaks = 0.80) +
+  geom_contour(aes(z = power_cmp, color = "CMP GLM"),        linewidth = 1.0, breaks = 0.80) +
+  scale_fill_gradient2(low = "#C0504D", mid = "grey95", high = "#2C4E73",
+                       midpoint = 0, limits = c(-dmax_no, dmax_no),
+                       labels = percent_format(accuracy = 1),
+                       name = "\u0394 power\n(CMP \u2212 t-test)") +
+  scale_color_manual(values = c("Welch's t-test" = "#F4A261", "CMP GLM" = "#1B1B1B"),
+                     name = "80% power contour") +
+  scale_x_continuous(breaks = c(3, 4, 5, 6, 7, 8, 10, 12), expand = c(0, 0)) +
+  scale_y_continuous(breaks = seq(0, 0.35, 0.05), expand = c(0, 0)) +
+  labs(title = "Animal-level: CMP GLM vs Welch's t-test",
+       subtitle = sprintf("change = %.2f. Blue: CMP wins. Above each line: 80%% power reached.", change_fixed),
+       x = "animals per group", y = "between-animal CV") +
+  theme_bw(base_size = 11) +
+  theme(panel.grid = element_blank(), legend.position = "right", legend.box = "vertical")
+```
+
+```{r money-power-re, fig.height=5.5}
+#| label: fig-money-power-re
+#| fig-cap: "Field-level (with random effects). Size-adjusted power difference (CMP GLMM − LMM) at change = 1.3, on the same axes for direct comparison with the animal-level figure above."
+
+set.seed(2)
+mc_grid_re <- expand.grid(n_animals = n_grid, CV = cv_grid, mc = seq_len(M),
+                          KEEP.OUT.ATTRS = FALSE)
+mc_grid_re$change <- change_fixed
+mc_grid_re$nu     <- exp(runif(nrow(mc_grid_re), log(0.25), log(4.0)))
+mc_grid_re$m      <- round(exp(runif(nrow(mc_grid_re), log(50), log(800))))
+mc_grid_re$p0     <- exp(runif(nrow(mc_grid_re), log(0.03), log(0.40)))
+
+mc_grid_re$p_lmm_raw <- chunk_predict(em_power_re$power_lmm, mc_grid_re, transform_inputs_main, "logit")
+mc_grid_re$p_cmp_raw <- chunk_predict(em_power_re$power_cmp, mc_grid_re, transform_inputs_main, "logit")
+mc_grid_re$t1_lmm    <- chunk_predict(em_null_re$type1_lmm,  mc_grid_re, transform_inputs_null, "logit")
+mc_grid_re$t1_cmp    <- chunk_predict(em_null_re$type1_cmp,  mc_grid_re, transform_inputs_null, "logit")
+
+mc_grid_re$p_lmm_adj <- mc_grid_re$p_lmm_raw - (mc_grid_re$t1_lmm - 0.05)
+mc_grid_re$p_cmp_adj <- mc_grid_re$p_cmp_raw - (mc_grid_re$t1_cmp - 0.05)
+
+agg_power_re <- mc_grid_re |>
+  group_by(n_animals, CV) |>
+  summarise(power_lmm = mean(p_lmm_adj),
+            power_cmp = mean(p_cmp_adj),
+            delta_adj = mean(p_cmp_adj - p_lmm_adj),
+            .groups = "drop")
+
+dmax_re <- max(abs(agg_power_re$delta_adj))
+
+ggplot(agg_power_re, aes(x = n_animals, y = CV)) +
+  geom_raster(aes(fill = delta_adj), interpolate = TRUE) +
+  geom_contour(aes(z = power_lmm, color = "LMM"),      linewidth = 1.0, breaks = 0.80) +
+  geom_contour(aes(z = power_cmp, color = "CMP GLMM"), linewidth = 1.0, breaks = 0.80) +
+  scale_fill_gradient2(low = "#C0504D", mid = "grey95", high = "#2C4E73",
+                       midpoint = 0, limits = c(-dmax_re, dmax_re),
+                       labels = percent_format(accuracy = 1),
+                       name = "\u0394 power\n(CMP \u2212 LMM)") +
+  scale_color_manual(values = c("LMM" = "#F4A261", "CMP GLMM" = "#1B1B1B"),
+                     name = "80% power contour") +
+  scale_x_continuous(breaks = c(3, 4, 5, 6, 7, 8, 10, 12), expand = c(0, 0)) +
+  scale_y_continuous(breaks = seq(0, 0.35, 0.05), expand = c(0, 0)) +
+  labs(title = "Field-level: CMP GLMM vs LMM",
+       subtitle = sprintf("change = %.2f. Blue: CMP GLMM wins. Above each line: 80%% power reached.", change_fixed),
+       x = "animals per group", y = "between-animal CV") +
+  theme_bw(base_size = 11) +
+  theme(panel.grid = element_blank(), legend.position = "right", legend.box = "vertical")
+```
+
+These plots reinforce what we already saw on the ideal dataset: when there is plenty of good data, all four methods agree. The heatmaps confirm it: the 80% power contour lands at essentially the same spot for both methods in each pipeline.
+
+Yet, two things become visible from this "real world" analysis. First, **adding random effects shifts the 80% contour to the left.** Pipeline B reaches 80% power with noticeably fewer animals than Pipeline A across the realistic CV range. Modeling the hierarchy with `(1 | EmbryoID)` lets you save animals — a non-trivial 3R win for the same scientific question.
+
+Second, and this is the punchline: **in the underpowered regime below the 80% line — where most real experiments actually live — the count likelihood outshines the Gaussian one.** Across most of that space CMP wins by 3 to 8 percentage points, in both pipelines. In practical terms, when you run a typical small-animal study with a real 30% effect, the count-regression test is more likely to give you the satisfying p < 0.05 than the t-test on the same data. Neither method magically rescues a badly-designed study, but in the space where biology usually lives, count regression gives you the better shot at seeing the effect that is actually there.
+
+## CI precision
+
+So far we've established that count regression is more likely to deliver the satisfying `p < 0.05` in the small-n regime. But a `p < 0.05` on its own isn't the whole story. Two reasons to care about how *precisely* each method measures the effect, not just whether it can detect one.
+
+First, magnitude matters. A 95% CI of [-0.1, 0.5] and a 95% CI of [0.45, 0.55] both contain a real effect, but they're telling different scientific stories. The first is "we can't rule out no effect"; the second is "the effect is right around 0.5". For any biology question that needs an answer beyond yes/no, interval width is the real currency.
+
+Second, and more practically, post-hoc contrasts in multi-group or multi-factor designs live or die by precision. If your group-level estimates are noisy, the pairwise comparisons that come out of them, the tests that often carry the real biological story, will be underpowered even when the overall effect is detectable. You'll get a significant main effect and then watch every post-hoc comparison fail to clear `p < 0.05`. Tight intervals at the group level are what keep that from happening.
+
+The main campaign records the median 95% CI width per (design, method), which feeds four more GP emulators. The structure of this section mirrors the power section: emulator diagnostics, Sobol decomposition of what drives precision, then the headline comparison.
+
+### Width emulator diagnostics
+
+```{r loo-width-all, fig.height=6}
+#| label: fig-loo-width-all
+#| fig-cap: "LOOCV residuals for the four CI-width emulators on the log scale. Top row: animal-level. Bottom row: field-level."
+
+pA <- plot_loo_residuals(list(em_main_no_re$width_tt, em_main_no_re$width_cmp),
+                         method_colors_no_re,
+                         y_label = "observed \u2212 predicted log(width)")
+pB <- plot_loo_residuals(list(em_width_re$width_lmm, em_width_re$width_cmp),
+                         method_colors_re,
+                         y_label = "observed \u2212 predicted log(width)")
+pA / pB
+```
+
+### What drives width: Sobol decomposition
+
+```{r sobol-width-all, fig.height=8}
+#| label: fig-sobol-width-all
+#| fig-cap: "Sobol indices for the four CI-width emulators. Solid bars: first-order (main effect). Light bars: total-order (main + interactions). Error bars: 95% bootstrap CIs on total-order."
+
+pA <- plot_sobol(sobol_no_re |> filter(target == "Width"), method_colors_no_re,
+                 title = "Animal-level (no random effects)")
+pB <- plot_sobol(sobol_re    |> filter(target == "Width"), method_colors_re,
+                 title = "Field-level (with random effects)")
+pA / pB
+```
+
+In contrast to power, `change` is essentially zero, and it should be: once you have data with a real effect, the magnitude of that effect doesn't determine how precisely you measure it. Width is governed by between-animal noise and sample size.
+
+So the hierarchy reorders. `CV` is the dominant driver of width (~50% of variance) and `n_animals` is second (~15-20%). All four methods agree on this.
+
+Two other things pop out. The remaining knobs `ν`, `m`, and `p0` have small first-order effects but visibly larger total-order indices: their light bars sit roughly 2-5× higher than their solid bars. Most of their influence flows through interactions with the other knobs rather than directly. And the four methods look strikingly similar on this decomposition. The precision advantage we are about to see does not come from one method responding to a knob the others ignore. It comes from something subtler: how efficiently each method extracts information from the same drivers.
+
+### Per-design CI-width comparison
+
+```{r width-summary-all, fig.height=6}
+#| label: fig-width-summary-all
+#| fig-cap: "Paired per-design CI-width gap across the 300 main-campaign LHS points, both pipelines. Negative: Gaussian method is tighter. Positive: count-likelihood method is tighter. Dashed line: parity. Coloured line: median."
+
+pair_no_re <- main_summary_no_re |>
+  select(point_id, method, median_width) |>
+  pivot_wider(names_from = method, values_from = median_width) |>
+  mutate(pct_narrower = (1 - cmp_glm / t_test) * 100)
+med_no <- median(pair_no_re$pct_narrower, na.rm = TRUE)
+win_no <- mean(pair_no_re$pct_narrower > 0, na.rm = TRUE)
+
+pair_re <- main_summary_re |>
+  filter(!point_id %in% excluded_re$main) |>
+  select(point_id, method, median_width) |>
+  pivot_wider(names_from = method, values_from = median_width) |>
+  mutate(pct_narrower = (1 - cmp_glmm / lmm) * 100)
+med_re <- median(pair_re$pct_narrower, na.rm = TRUE)
+win_re <- mean(pair_re$pct_narrower > 0, na.rm = TRUE)
+
+pA <- ggplot(pair_no_re, aes(x = pct_narrower)) +
+  geom_histogram(binwidth = 1, fill = "#2C4E73", alpha = 0.85,
+                 color = "white", linewidth = 0.2) +
+  geom_vline(xintercept = 0,       linetype = "dashed", color = "grey30") +
+  geom_vline(xintercept = med_no,  color = "#7A3431",   linewidth = 0.9) +
+  scale_x_continuous(labels = function(x) sprintf("%+d%%", x)) +
+  annotate("text", x = med_no, y = Inf,
+           label = sprintf("median = %+.1f%%", med_no),
+           hjust = -0.1, vjust = 1.8, size = 3.3, color = "#7A3431") +
+  labs(title = sprintf("Animal-level: CMP GLM vs Welch's t-test (%.0f%% of designs CMP is tighter)",
+                       100 * win_no),
+       x = "CMP's CI narrower than Welch's by", y = "design points") +
+  theme_bw(base_size = 11)
+
+pB <- ggplot(pair_re, aes(x = pct_narrower)) +
+  geom_histogram(binwidth = 1, fill = "#2C4E73", alpha = 0.85,
+                 color = "white", linewidth = 0.2) +
+  geom_vline(xintercept = 0,      linetype = "dashed", color = "grey30") +
+  geom_vline(xintercept = med_re, color = "#7A3431",   linewidth = 0.9) +
+  scale_x_continuous(labels = function(x) sprintf("%+d%%", x)) +
+  annotate("text", x = med_re, y = Inf,
+           label = sprintf("median = %+.1f%%", med_re),
+           hjust = -0.1, vjust = 1.8, size = 3.3, color = "#7A3431") +
+  labs(title = sprintf("Field-level: CMP GLMM vs LMM (%.0f%% of designs CMP GLMM is tighter)",
+                       100 * win_re),
+       x = "CMP GLMM's CI narrower than LMM's by", y = "design points") +
+  theme_bw(base_size = 11)
+
+pA / pB
+```
+
+At the animal level, **CMP's CI is narrower at ~97% of the 300 LHS designs, with a median ~7% improvement**. At the field level the effect is stronger: **CMP GLMM is narrower at essentially every design, with a median ~12% improvement**. The asymmetry makes sense: the field-level fit uses all the data instead of pre-aggregating, which gives the count likelihood more room to exploit the dispersion parameter.
+
+# Bottom line
+
+Across 300 realistic designs and three metrics, the picture is consistent.
+
+**When the experiment is well-powered, all four methods agree.** At and above 80% power, the choice between Welch, LMM, CMP GLM, and CMP GLMM doesn't materially change the answer. If you have plenty of animals and a large effect, use whichever you are comfortable with.
+
+**When the experiment is underpowered, the count likelihood gives you the better shot at seeing the effect.** Across most of the realistic small-n / moderate-CV regime where biology usually lives, CMP wins by 3 to 8 percentage points of size-adjusted power over the Gaussian alternative. No method magically rescues a badly-designed study, but in the regime where the answer is hard to read, count regression is the better tool.
+
+**Modeling the field-level hierarchy further shifts the 80% power contour to the left.** Field-level fits with `(1 | EmbryoID)` reach 80% power with noticeably fewer animals than animal-level aggregation does. A direct 3R win for the same scientific question.
+
+**On precision, the count likelihood almost always wins.** CMP GLM produces narrower 95% CIs at ~97% of the 300 LHS designs (median ~7% narrower than Welch). CMP GLMM does it at essentially every design (median ~12% narrower than LMM). Precision matters wherever the work continues past a single yes/no test: post-hoc contrasts in multi-factor designs, replication studies, meta-analyses, or simply translating "X% increase" into a defensible biological claim.
+
+### Practical recommendation
+
+- **Default**: CMP GLMM with `glmmTMB(Y ~ Group + offset(log(N)) + (1 | EmbryoID), family = compois())`. At least as good as any other choice in every regime we tested, and meaningfully better in the regime where most experiments live.
+- **Acceptable fallback**: animal-level CMP GLM if the random-effect fit doesn't converge (sometimes happens at very small n with very rare events).
+- **Reasonable but suboptimal**: Welch's t-test on per-animal ratios, if you have a well-resourced experiment and are not chasing subtle effects.
+
+There is no real-world downside to the count-likelihood approach. Its mild Type-I anti-conservatism at the animal level is small enough that size adjustment handles it, and you gain power and precision essentially for free.
+
+# References
+
+**Methods.** The Type-I calibration band comes from Bradley (1978). The size-adjusted power formula is the first-order Lloyd correction (Lloyd, 2005). The biology, imaging pipeline, and count-regression case that this post builds on were developed in Bogomolovas et al. (2022).
+
+- Bogomolovas, J., et al. (2022). *[TODO: fill in title — PMID 36563012]*. <https://pubmed.ncbi.nlm.nih.gov/36563012/>
+- Bradley, J. V. (1978). Robustness? *British Journal of Mathematical and Statistical Psychology*, 31, 144–152.
+- Lloyd, C. J. (2005). Estimating test power adjusted for size. *Journal of Statistical Computation and Simulation*, 75(11), 921–933.
+
+**R packages.** Citations below are generated from the rendering session via `grateful::cite_packages()`. Full citations follow.
+
+```{r pkg-citations}
+#| label: pkg-citations
+#| echo: false
+#| results: asis
+grateful::cite_packages(output = "paragraph", out.dir = ".", cite.tidyverse = TRUE)
+```
+
+::: {#refs}
+:::
+
+---
+
+::: {.callout-note collapse="true"}
+## Reproducibility
+
+The expensive parts of this analysis (LHS simulation campaigns, GP fitting with LOOCV, Sobol index computation) are all done offline. The .qmd just loads precomputed `.rds` bundles.
+
+| file | contents |
+|------|----------|
+| `lhs_null_campaign.rds`     | 300-point null LHS, animal-level fits |
+| `lhs_campaign.rds`          | 300-point main LHS, animal-level fits |
+| `lhs_null_campaign_re.rds`  | 300-point null LHS, field-level fits |
+| `lhs_campaign_re.rds`       | 300-point main LHS, field-level fits |
+| `gp_null_emulators.rds`     | Pipeline A Type-I GP emulators (with LOOCV) |
+| `gp_emulators.rds`          | Pipeline A power + width GP emulators (with LOOCV) |
+| `gp_emulators_re.rds`       | Pipeline B GP emulators: Type-I, power, width (with LOOCV) |
+| `sobol_no_re_indices.rds`   | Pipeline A Sobol indices for power + width |
+| `sobol_re_indices.rds`      | Pipeline B Sobol indices for power + width |
+
+All `gp_*` and `sobol_*` bundles are rebuilt by `refit_emulators.R` (run once from the `.qmd` directory). The script's core fitting logic is reproduced earlier in this document as the `refit-doc` chunk.
+:::
