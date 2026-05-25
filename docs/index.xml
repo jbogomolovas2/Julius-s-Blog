@@ -15,7 +15,3275 @@
 <link>https://jbogomolovas2.github.io/Julius-s-Blog/</link>
 </image>
 <generator>quarto-1.7.32</generator>
-<lastBuildDate>Tue, 19 May 2026 07:00:00 GMT</lastBuildDate>
+<lastBuildDate>Sun, 24 May 2026 07:00:00 GMT</lastBuildDate>
+<item>
+  <title>Conway–Maxwell–Binomial regression: two-directional dispersion for bounded counts</title>
+  <dc:creator>Julius Bogomolovas</dc:creator>
+  <link>https://jbogomolovas2.github.io/Julius-s-Blog/posts/CMB_regression/</link>
+  <description><![CDATA[ 
+
+
+
+
+
+<section id="how-i-got-here" class="level2">
+<h2 class="anchored" data-anchor-id="how-i-got-here">How I got here</h2>
+<p>For a long time I was fitting cell proliferation counts with Conway-Maxwell-Poisson and a <code>log(n)</code> offset. It worked fine. Counts behaved like rates, the dispersion parameter ν gave me a handle on whether the data were over or underdispersed relative to Poisson, and the offset turned an unbounded count distribution into something that read like a proportion model. Standard applied stats move, nothing exotic.</p>
+<p>Then I tried to build a simulator. In the <a href="https://jbogomolovas2.github.io/Julius-s-Blog/posts/comparison/">previous post</a> I wrote a CMP-with-offset data generator so I could check coverage and power before running real experiments. And the simulator started producing counts above the biological ceiling. Cells dividing more times than there are cells. The unbounded count distribution does not know my data has an upper bound, and the offset trick does not enforce one.</p>
+<p>In my real data this had not bitten me because proliferation rarely hits the ceiling. So the bound was a silent assumption I had been getting away with for years. The simulator surfaced it.</p>
+<p>That sent me reading. The right answer for bounded counts with flexible dispersion is the Conway-Maxwell-Binomial distribution, the bounded analogue of CMP. It spans both dispersion directions through the same ν parameter, and it respects the bound by construction.</p>
+<p>The puzzle is why CMB is not a standard tool. Underdispersion in proportion data is a known headache and the workarounds in common use are all unsatisfying. The oldest is the arcsine square-root transformation: apply a variance-stabilizing transform to the observed proportions and fit a Gaussian regression on the transformed values. This throws away the bounded discrete structure of the data, produces coefficients on a scale that does not map cleanly back to rates, and offers no way to model dispersion separately from the mean. The coral fertilization paper we work through later in this post takes exactly this route, and we will see why it leaves a real biological signal on the table. A second workaround is quasi-binomial, which allows the dispersion parameter to fall below 1 but does so without a proper likelihood behind it, so AIC comparisons, likelihood ratio tests, and random effects are all off the table. A third option is to fit a binomial GLM and ignore the underdispersion, accepting standard errors that are wrong in a direction that is hard to predict from the output alone. None of these is what someone would reach for if a clean alternative were sitting in their toolkit.</p>
+<p>R support for CMB is thin. The <a href="https://rdrr.io/github/andrewraim/COMMultReg/">COMMultReg package</a> by Andrew Raim <span class="citation" data-cites="COMMultReg">(Raim, n.d.)</span> provides distribution-level utilities for CMB (density, sampling, normalizing constant, mean, variance) and a full regression interface for the <em>multinomial</em> generalization. The package name is honest about its scope: Conway-Maxwell-<em>Multinomial</em> Regression. The binomial case sits in the distribution module only, in the canonical <code>(m, p, ν)</code> parameterization <span class="citation" data-cites="kadane2016cmb">(Kadane 2016)</span>, with no regression interface, no formula syntax, no dispersion submodel, and no random effects.</p>
+<p>So that is what I built. CMB now lives on two public forks: the <a href="https://github.com/jbogomolovas2/adcomp/tree/cmb-family">TMB-side family definition</a> with the auto-differentiable likelihood, and the <a href="https://github.com/jbogomolovas2/glmmTMB/tree/cmb-family">glmmTMB-side integration</a> that wires it into the formula interface so you can write <code>family = compbinomial, dispformula = ~ ...</code> like any other family. It is not on CRAN. Maybe one day. For now if you want to follow along you install from those forks.</p>
+<p>This post is two things. First, a short explanation of why CMB is the right tool when your data are bounded and your dispersion is heterogeneous or two-sided. Second, two worked examples: a simulated three-group dataset where you can see the machinery work in controlled conditions, and a real coral fertilization study where CMB sharpens the biological finding the original analysis could not formally test.</p>
+</section>
+<section id="the-dispersion-landscape" class="level2">
+<h2 class="anchored" data-anchor-id="the-dispersion-landscape">The dispersion landscape</h2>
+<p>A short conceptual section before code.</p>
+<p>You have a bounded count: <img src="https://latex.codecogs.com/png.latex?y"> successes out of <img src="https://latex.codecogs.com/png.latex?n"> trials. The default model is binomial, which fixes the variance at <img src="https://latex.codecogs.com/png.latex?%5Ctext%7BVar%7D(y)%20=%20np(1-p)"> once you condition on the mean. Real data are often more variable than this, sometimes less. The deviation from binomial variance, in either direction, is what people call dispersion.</p>
+<p>The standard fix for <em>more</em> variance than binomial is the beta-binomial. It writes the variance as</p>
+<p><img src="https://latex.codecogs.com/png.latex?%5Ctext%7BVar%7D(y)%20=%20np(1-p)%5C,%5Cbigl%5B1%20+%20(n-1)%5Crho%5Cbigr%5D,%20%5Cquad%20%5Crho%20%5Cin%20%5B0,%201)."></p>
+<p>The dispersion parameter <img src="https://latex.codecogs.com/png.latex?%5Crho"> inflates the binomial variance. When <img src="https://latex.codecogs.com/png.latex?%5Crho%20=%200"> you recover binomial. When <img src="https://latex.codecogs.com/png.latex?%5Crho%20%5Cto%201"> the variance approaches the maximum possible for a bounded count. So beta-binomial covers everything from binomial up to the upper bound.</p>
+<p>What it does not cover is anything below the binomial line. The constraint <img src="https://latex.codecogs.com/png.latex?%5Crho%20%5Cgeq%200"> is not a numerical artifact, it is a property of the family. If your data are <em>less</em> variable than binomial, the BB likelihood pushes <img src="https://latex.codecogs.com/png.latex?%5Crho"> against zero and either pegs there (silently behaving as binomial) or fails to converge with a non-positive-definite Hessian. There is no way to wiggle through it.</p>
+<p>The Conway-Maxwell-Binomial family does cover both sides. Its variance, approximately, behaves like <img src="https://latex.codecogs.com/png.latex?np(1-p)/%5Cnu">, with the dispersion parameter <img src="https://latex.codecogs.com/png.latex?%5Cnu"> on a multiplicative scale: <img src="https://latex.codecogs.com/png.latex?%5Cnu%20=%201"> is binomial, <img src="https://latex.codecogs.com/png.latex?%5Cnu%20%3C%201"> is overdispersed (more variance), <img src="https://latex.codecogs.com/png.latex?%5Cnu%20%3E%201"> is underdispersed (less variance). One parameter, two directions, the bound preserved.</p>
+<p>The other natural alternative for rate-like data, CMP with a <code>log(n)</code> offset, fails for a different reason. It is an unbounded count distribution, so the bound is not part of the model. In situations where counts rarely approach <img src="https://latex.codecogs.com/png.latex?n"> the offset trick can be a decent approximation, but it is not a principled choice for bounded data and it breaks at the ceiling.</p>
+<p>A picture of what these three families look like for the same mean and different ν values:</p>
+<div class="cell">
+<details class="code-fold">
+<summary>Show code</summary>
+<div class="sourceCode cell-code" id="cb1" style="background: #f1f3f5;"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb1-1">n  <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> <span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">20</span></span>
+<span id="cb1-2">k  <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> <span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">0</span><span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">:</span>n</span>
+<span id="cb1-3"></span>
+<span id="cb1-4"><span class="co" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;"># COMMultReg uses canonical (m, p, nu) parameterization. At p = 0.5 the</span></span>
+<span id="cb1-5"><span class="co" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;"># CMB pmf is symmetric about n/2 for any nu, so the mean equals n/2 = 10</span></span>
+<span id="cb1-6"><span class="co" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;"># in all three regimes without inverting the mean-p relation.</span></span>
+<span id="cb1-7">p_over  <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">sapply</span>(k, <span class="cf" style="color: #003B4F;
+background-color: null;
+font-weight: bold;
+font-style: inherit;">function</span>(x) <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">d_cmb</span>(x, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">m =</span> n, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">p =</span> <span class="fl" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">0.5</span>, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">nu =</span> <span class="fl" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">0.5</span>))</span>
+<span id="cb1-8">p_bin   <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">dbinom</span>(k, n, <span class="fl" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">0.5</span>)</span>
+<span id="cb1-9">p_under <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">sapply</span>(k, <span class="cf" style="color: #003B4F;
+background-color: null;
+font-weight: bold;
+font-style: inherit;">function</span>(x) <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">d_cmb</span>(x, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">m =</span> n, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">p =</span> <span class="fl" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">0.5</span>, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">nu =</span> <span class="fl" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">2.0</span>))</span>
+<span id="cb1-10"></span>
+<span id="cb1-11">df_pmf <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> dplyr<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">::</span><span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">bind_rows</span>(</span>
+<span id="cb1-12">  tibble<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">::</span><span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">tibble</span>(<span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">k =</span> k, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">pmf =</span> p_over,  <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">regime =</span> <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"overdispersed (ν &lt; 1)"</span>),</span>
+<span id="cb1-13">  tibble<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">::</span><span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">tibble</span>(<span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">k =</span> k, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">pmf =</span> p_bin,   <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">regime =</span> <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"binomial (ν = 1)"</span>),</span>
+<span id="cb1-14">  tibble<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">::</span><span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">tibble</span>(<span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">k =</span> k, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">pmf =</span> p_under, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">regime =</span> <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"underdispersed (ν &gt; 1)"</span>)</span>
+<span id="cb1-15">) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">%&gt;%</span></span>
+<span id="cb1-16">  dplyr<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">::</span><span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">mutate</span>(<span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">regime =</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">factor</span>(regime, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">levels =</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">c</span>(</span>
+<span id="cb1-17">    <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"overdispersed (ν &lt; 1)"</span>,</span>
+<span id="cb1-18">    <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"binomial (ν = 1)"</span>,</span>
+<span id="cb1-19">    <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"underdispersed (ν &gt; 1)"</span></span>
+<span id="cb1-20">  )))</span>
+<span id="cb1-21"></span>
+<span id="cb1-22"><span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">ggplot</span>(df_pmf, <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">aes</span>(<span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">x =</span> k, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">y =</span> pmf, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">color =</span> regime)) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">+</span></span>
+<span id="cb1-23">  <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">geom_point</span>(<span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">size =</span> <span class="fl" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">2.5</span>) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">+</span></span>
+<span id="cb1-24">  <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">geom_line</span>(<span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">aes</span>(<span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">group =</span> regime), <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">alpha =</span> <span class="fl" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">0.6</span>) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">+</span></span>
+<span id="cb1-25">  <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">scale_color_manual</span>(<span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">values =</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">c</span>(<span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"#d7191c"</span>, <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"grey30"</span>, <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"#2c7bb6"</span>)) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">+</span></span>
+<span id="cb1-26">  <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">labs</span>(<span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">x =</span> <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"y (successes out of n = 20)"</span>,</span>
+<span id="cb1-27">       <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">y =</span> <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"probability mass"</span>,</span>
+<span id="cb1-28">       <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">title =</span> <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"Same mean rate, three dispersion regimes"</span>)</span></code></pre></div>
+</details>
+<div class="cell-output-display">
+<div class="quarto-figure quarto-figure-center">
+<figure class="figure">
+<p><img src="https://jbogomolovas2.github.io/Julius-s-Blog/posts/CMB_regression/index_files/figure-html/dispersion-densities-1.png" class="img-fluid figure-img" width="960"></p>
+<figcaption>CMB pmf for n = 20 at mean rate 0.5, under three dispersion regimes. The binomial baseline (ν = 1) is shown in grey. Overdispersion (ν = 0.5) flattens the mass relative to binomial. Underdispersion (ν = 2) concentrates it around the mean. Densities computed with <code>COMMultReg::d_cmb</code>.</figcaption>
+</figure>
+</div>
+</div>
+</div>
+</section>
+<section id="the-implementation" class="level2">
+<h2 class="anchored" data-anchor-id="the-implementation">The implementation</h2>
+<p>Two things needed to happen to get CMB working as a regression family in R.</p>
+<section id="mean-parameterization" class="level3">
+<h3 class="anchored" data-anchor-id="mean-parameterization">Mean parameterization</h3>
+<p>The standard CMB pmf <span class="citation" data-cites="kadane2016cmb">(Kadane 2016)</span> is</p>
+<p><img src="https://latex.codecogs.com/png.latex?P(X%20=%20k%20%5Cmid%20n,%20p,%20%5Cnu)%20=%20%5Cfrac%7B1%7D%7BZ(n,%20p,%20%5Cnu)%7D%5Cbinom%7Bn%7D%7Bk%7D%5E%5Cnu%20p%5Ek%20(1-p)%5E%7Bn-k%7D"></p>
+<p>with normalizing constant <img src="https://latex.codecogs.com/png.latex?Z(n,%20p,%20%5Cnu)%20=%20%5Csum_%7Bj=0%7D%5E%7Bn%7D%20%5Cbinom%7Bn%7D%7Bj%7D%5E%5Cnu%20p%5Ej%20(1-p)%5E%7Bn-j%7D">. This is a finite sum, which matters: unlike the CMP normalizing constant, the CMB version does not need truncation or special-function approximations.</p>
+<p>The catch is the role of <img src="https://latex.codecogs.com/png.latex?p">. When <img src="https://latex.codecogs.com/png.latex?%5Cnu%20=%201"> the family reduces to binomial and <img src="https://latex.codecogs.com/png.latex?p"> equals the mean rate. When <img src="https://latex.codecogs.com/png.latex?%5Cnu%20%5Cneq%201">, <img src="https://latex.codecogs.com/png.latex?p"> is just a canonical parameter and the mean <img src="https://latex.codecogs.com/png.latex?%5Cmu%20=%20E%5BX%5D/n"> depends on both <img src="https://latex.codecogs.com/png.latex?p"> and <img src="https://latex.codecogs.com/png.latex?%5Cnu"> together. There is no closed-form expression. This makes the canonical parameterization unusable for regression. If you wrote <code>logit(p) ~ X</code>, your coefficients would be shifts on a parameter that mixes mean and dispersion in a way the reader cannot interpret.</p>
+<p>What the implementation does, following the pattern glmmTMB uses for negative binomial and beta-binomial and the mean parameterization Huang <span class="citation" data-cites="huang2017meanCMP">(Huang 2017)</span> introduced for CMP, is the <em>mean-parametrized</em> version. Given a target mean <img src="https://latex.codecogs.com/png.latex?%5Cmu"> and a dispersion <img src="https://latex.codecogs.com/png.latex?%5Cnu">, solve numerically for the <img src="https://latex.codecogs.com/png.latex?p"> that satisfies <img src="https://latex.codecogs.com/png.latex?E%5BX%20%5Cmid%20n,%20p,%20%5Cnu%5D%20=%20n%5Cmu">, then use that <img src="https://latex.codecogs.com/png.latex?p"> inside the likelihood. The user-facing model is then:</p>
+<pre><code>logit(μ) = Xβ        # mean rate, modeled like any binomial-family GLM
+log(ν)   = Zγ        # dispersion, modeled separately</code></pre>
+<p>The Newton iteration to solve for <img src="https://latex.codecogs.com/png.latex?p"> runs at every likelihood evaluation. This is fine because TMB handles the derivatives by automatic differentiation, so the gradient of the marginal likelihood propagates through the inner solve without any hand-coded chain rule. This is the main reason I built on TMB rather than coding the family in plain R.</p>
+</section>
+<section id="family-registration-on-the-tmb-side" class="level3">
+<h3 class="anchored" data-anchor-id="family-registration-on-the-tmb-side">Family registration on the TMB side</h3>
+<p>The <code>compbinomial</code> family is added to TMB’s family list with its own log-density function, then exposed to glmmTMB through its dispatch. Once registered it inherits everything: random effects, dispformula, zero-inflation if you want it, the standard <code>fixef()</code> / <code>ranef()</code> / <code>vcov()</code> accessors. The model code looks identical to any other glmmTMB fit:</p>
+<div class="cell">
+<div class="sourceCode cell-code" id="cb3" style="background: #f1f3f5;"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb3-1"><span class="co" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;"># Install from forks (one-time)</span></span>
+<span id="cb3-2">remotes<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">::</span><span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">install_github</span>(<span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"jbogomolovas2/adcomp"</span>,  <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">ref =</span> <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"cmb-family"</span>,</span>
+<span id="cb3-3">                        <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">subdir =</span> <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"TMB"</span>)</span>
+<span id="cb3-4">remotes<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">::</span><span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">install_github</span>(<span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"jbogomolovas2/glmmTMB"</span>, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">ref =</span> <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"cmb-family"</span>,</span>
+<span id="cb3-5">                        <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">subdir =</span> <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"glmmTMB"</span>)</span>
+<span id="cb3-6"></span>
+<span id="cb3-7"><span class="co" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;"># Then use it like any glmmTMB family</span></span>
+<span id="cb3-8">fit <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">glmmTMB</span>(<span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">cbind</span>(y, n <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">-</span> y) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">~</span> group <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">+</span> (<span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">1</span> <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">|</span> id),</span>
+<span id="cb3-9">               <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">dispformula =</span> <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">~</span> group,</span>
+<span id="cb3-10">               <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">family      =</span> compbinomial,</span>
+<span id="cb3-11">               <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">data        =</span> my_data)</span></code></pre></div>
+</div>
+<p>That’s the whole interface. From the user’s side it is just another family. The work was making it behave that way.</p>
+</section>
+</section>
+<section id="a-simulated-three-group-example" class="level2">
+<h2 class="anchored" data-anchor-id="a-simulated-three-group-example">A simulated three-group example</h2>
+<p>The cleanest way to see the families fail and succeed is to put them on data where we control the truth. We simulate three groups of observations from CMB itself, with the same trial size and the same mean rate in each group, but with three different dispersion parameters: ν = 0.5 (overdispersed), ν = 1 (binomial), ν = 2 (underdispersed). Each group has sixty observations of <code>y</code> out of <code>n = 30</code> trials. We set the canonical parameter <code>p = 0.5</code> so the CMB distribution is symmetric about <code>n/2</code> for any ν, which puts the true mean at exactly <code>15</code> in all three groups without needing to invert the mean-p relation. We then fit four models on the pooled data and compare them: binomial (no dispersion submodel), beta-binomial with <code>dispformula = ~ group</code>, CMP-with-offset with <code>dispformula = ~ group</code>, and CMB with <code>dispformula = ~ group</code>.</p>
+<div class="cell">
+<details class="code-fold">
+<summary>Show code</summary>
+<div class="sourceCode cell-code" id="cb4" style="background: #f1f3f5;"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb4-1"><span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">library</span>(COMMultReg)</span>
+<span id="cb4-2"><span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">library</span>(glmmTMB)</span>
+<span id="cb4-3"></span>
+<span id="cb4-4"><span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">set.seed</span>(<span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">42</span>)</span>
+<span id="cb4-5"></span>
+<span id="cb4-6">n_trials  <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> <span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">30</span></span>
+<span id="cb4-7">n_per_grp <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> <span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">60</span></span>
+<span id="cb4-8">p_true    <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> <span class="fl" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">0.5</span></span>
+<span id="cb4-9">nu_true   <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">c</span>(<span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">over =</span> <span class="fl" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">0.5</span>, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">binomial =</span> <span class="fl" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">1.0</span>, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">under =</span> <span class="fl" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">2.0</span>)</span>
+<span id="cb4-10"></span>
+<span id="cb4-11">sim_data <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> dplyr<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">::</span><span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">bind_rows</span>(<span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">lapply</span>(<span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">names</span>(nu_true), <span class="cf" style="color: #003B4F;
+background-color: null;
+font-weight: bold;
+font-style: inherit;">function</span>(g) {</span>
+<span id="cb4-12">  tibble<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">::</span><span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">tibble</span>(</span>
+<span id="cb4-13">    <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">group =</span> g,</span>
+<span id="cb4-14">    <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">n     =</span> n_trials,</span>
+<span id="cb4-15">    <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">y     =</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">r_cmb</span>(n_per_grp, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">m =</span> n_trials, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">p =</span> p_true, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">nu =</span> nu_true[[g]])</span>
+<span id="cb4-16">  )</span>
+<span id="cb4-17">})) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">|&gt;</span></span>
+<span id="cb4-18">  dplyr<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">::</span><span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">mutate</span>(</span>
+<span id="cb4-19">    <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">group =</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">factor</span>(group, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">levels =</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">c</span>(<span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"over"</span>, <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"binomial"</span>, <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"under"</span>)),</span>
+<span id="cb4-20">    <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">miss  =</span> n <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">-</span> y</span>
+<span id="cb4-21">  )</span>
+<span id="cb4-22"></span>
+<span id="cb4-23">sim_data <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">|&gt;</span></span>
+<span id="cb4-24">  dplyr<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">::</span><span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">group_by</span>(group) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">|&gt;</span></span>
+<span id="cb4-25">  dplyr<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">::</span><span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">summarise</span>(</span>
+<span id="cb4-26">    <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">n_obs            =</span> dplyr<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">::</span><span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">n</span>(),</span>
+<span id="cb4-27">    <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">mean_rate        =</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">mean</span>(y <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">/</span> n),</span>
+<span id="cb4-28">    <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">obs_var          =</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">var</span>(y),</span>
+<span id="cb4-29">    <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">binomial_var     =</span> n_trials <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">*</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">mean</span>(y<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">/</span>n) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">*</span> (<span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">1</span> <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">-</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">mean</span>(y<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">/</span>n)),</span>
+<span id="cb4-30">    <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">var_ratio        =</span> obs_var <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">/</span> binomial_var,</span>
+<span id="cb4-31">    <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">.groups          =</span> <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"drop"</span></span>
+<span id="cb4-32">  ) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">|&gt;</span></span>
+<span id="cb4-33">  knitr<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">::</span><span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">kable</span>(<span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">digits =</span> <span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">3</span>)</span></code></pre></div>
+</details>
+<div class="cell-output-display">
+<table class="caption-top table table-sm table-striped small">
+<thead>
+<tr class="header">
+<th style="text-align: left;">group</th>
+<th style="text-align: right;">n_obs</th>
+<th style="text-align: right;">mean_rate</th>
+<th style="text-align: right;">obs_var</th>
+<th style="text-align: right;">binomial_var</th>
+<th style="text-align: right;">var_ratio</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td style="text-align: left;">over</td>
+<td style="text-align: right;">60</td>
+<td style="text-align: right;">0.528</td>
+<td style="text-align: right;">17.68898</td>
+<td style="text-align: right;">7.476</td>
+<td style="text-align: right;">2.3661290</td>
+</tr>
+<tr class="even">
+<td style="text-align: left;">binomial</td>
+<td style="text-align: right;">60</td>
+<td style="text-align: right;">0.487</td>
+<td style="text-align: right;">10.44379</td>
+<td style="text-align: right;">7.495</td>
+<td style="text-align: right;">1.3934147</td>
+</tr>
+<tr class="odd">
+<td style="text-align: left;">under</td>
+<td style="text-align: right;">60</td>
+<td style="text-align: right;">0.504</td>
+<td style="text-align: right;">2.79548</td>
+<td style="text-align: right;">7.499</td>
+<td style="text-align: right;">0.3727601</td>
+</tr>
+</tbody>
+</table>
+</div>
+</div>
+<p>The last column is the empirical analogue of 1/ν. We expect about 2.0 for the overdispersed group, 1.0 for binomial, and 0.5 for the underdispersed group. The observed ratios (2.37, 1.39, 0.37) match the expected pattern, with the binomial group running a little high by chance at this sample size.</p>
+<div class="cell">
+<details class="code-fold">
+<summary>Show code</summary>
+<div class="sourceCode cell-code" id="cb5" style="background: #f1f3f5;"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb5-1"><span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">ggplot</span>(sim_data, <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">aes</span>(<span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">x =</span> group, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">y =</span> y <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">/</span> n, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">fill =</span> group)) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">+</span></span>
+<span id="cb5-2">  <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">geom_jitter</span>(<span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">width =</span> <span class="fl" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">0.15</span>, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">height =</span> <span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">0</span>, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">alpha =</span> <span class="fl" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">0.6</span>, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">shape =</span> <span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">21</span>, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">color =</span> <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"grey20"</span>) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">+</span></span>
+<span id="cb5-3">  <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">scale_y_continuous</span>(<span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">labels =</span> scales<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">::</span><span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">percent_format</span>(<span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">accuracy =</span> <span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">1</span>)) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">+</span></span>
+<span id="cb5-4">  <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">scale_fill_manual</span>(<span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">values =</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">c</span>(<span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">over =</span> <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"#d7191c"</span>, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">binomial =</span> <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"grey30"</span>, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">under =</span> <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"#2c7bb6"</span>)) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">+</span></span>
+<span id="cb5-5">  <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">labs</span>(<span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">x =</span> <span class="cn" style="color: #8f5902;
+background-color: null;
+font-style: inherit;">NULL</span>, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">y =</span> <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"observed rate"</span>, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">title =</span> <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"Simulated rates by group"</span>) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">+</span></span>
+<span id="cb5-6">  <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">theme</span>(<span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">legend.position =</span> <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"none"</span>)</span></code></pre></div>
+</details>
+<div class="cell-output-display">
+<div class="quarto-figure quarto-figure-center">
+<figure class="figure">
+<p><img src="https://jbogomolovas2.github.io/Julius-s-Blog/posts/CMB_regression/index_files/figure-html/sim-quick-look-1.png" class="img-fluid figure-img" width="960"></p>
+<figcaption>Simulated y / n by group. The overdispersed group has visibly more spread than the binomial baseline; the underdispersed group has visibly less.</figcaption>
+</figure>
+</div>
+</div>
+</div>
+<section id="fitting-the-four-candidates" class="level3">
+<h3 class="anchored" data-anchor-id="fitting-the-four-candidates">Fitting the four candidates</h3>
+<div class="cell">
+<details class="code-fold">
+<summary>Show code</summary>
+<div class="sourceCode cell-code" id="cb6" style="background: #f1f3f5;"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb6-1">safe_fit <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> <span class="cf" style="color: #003B4F;
+background-color: null;
+font-weight: bold;
+font-style: inherit;">function</span>(expr) {</span>
+<span id="cb6-2">  <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">tryCatch</span>(</span>
+<span id="cb6-3">    <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">list</span>(<span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">fit =</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">eval.parent</span>(<span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">substitute</span>(expr)), <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">error =</span> <span class="cn" style="color: #8f5902;
+background-color: null;
+font-style: inherit;">NA_character_</span>),</span>
+<span id="cb6-4">    <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">error =</span> <span class="cf" style="color: #003B4F;
+background-color: null;
+font-weight: bold;
+font-style: inherit;">function</span>(e) <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">list</span>(<span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">fit =</span> <span class="cn" style="color: #8f5902;
+background-color: null;
+font-style: inherit;">NULL</span>, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">error =</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">conditionMessage</span>(e))</span>
+<span id="cb6-5">  )</span>
+<span id="cb6-6">}</span>
+<span id="cb6-7"></span>
+<span id="cb6-8">form_bound <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">cbind</span>(y, miss) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">~</span> group</span>
+<span id="cb6-9">form_cmp   <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> y <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">~</span> group <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">+</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">offset</span>(<span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">log</span>(n))</span>
+<span id="cb6-10"></span>
+<span id="cb6-11">fits <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">list</span>(</span>
+<span id="cb6-12">  <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">binomial =</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">safe_fit</span>(<span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">glmmTMB</span>(form_bound, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">family =</span> binomial, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">data =</span> sim_data)),</span>
+<span id="cb6-13">  <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">bb       =</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">safe_fit</span>(<span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">glmmTMB</span>(form_bound, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">family =</span> betabinomial,</span>
+<span id="cb6-14">                              <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">dispformula =</span> <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">~</span> group, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">data =</span> sim_data)),</span>
+<span id="cb6-15">  <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">cmp      =</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">safe_fit</span>(<span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">glmmTMB</span>(form_cmp,   <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">family =</span> compois,</span>
+<span id="cb6-16">                              <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">dispformula =</span> <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">~</span> group, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">data =</span> sim_data)),</span>
+<span id="cb6-17">  <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">cmb      =</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">safe_fit</span>(<span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">glmmTMB</span>(form_bound, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">family =</span> compbinomial,</span>
+<span id="cb6-18">                              <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">dispformula =</span> <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">~</span> group, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">data =</span> sim_data))</span>
+<span id="cb6-19">)</span></code></pre></div>
+</details>
+<div class="cell-output cell-output-stderr">
+<pre><code>Warning in finalizeTMB(TMBStruc, obj, fit, h, data.tmb.old): Model convergence
+problem; non-positive-definite Hessian matrix. See vignette('troubleshooting')</code></pre>
+</div>
+<details class="code-fold">
+<summary>Show code</summary>
+<div class="sourceCode cell-code" id="cb8" style="background: #f1f3f5;"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb8-1">compare_tbl <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> dplyr<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">::</span><span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">bind_rows</span>(<span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">lapply</span>(<span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">names</span>(fits), <span class="cf" style="color: #003B4F;
+background-color: null;
+font-weight: bold;
+font-style: inherit;">function</span>(nm) {</span>
+<span id="cb8-2">  x <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> fits[[nm]]</span>
+<span id="cb8-3">  <span class="cf" style="color: #003B4F;
+background-color: null;
+font-weight: bold;
+font-style: inherit;">if</span> (<span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">is.null</span>(x<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">$</span>fit)) {</span>
+<span id="cb8-4">    <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">return</span>(<span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">data.frame</span>(<span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">family =</span> nm, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">df =</span> <span class="cn" style="color: #8f5902;
+background-color: null;
+font-style: inherit;">NA_real_</span>, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">AIC =</span> <span class="cn" style="color: #8f5902;
+background-color: null;
+font-style: inherit;">NA_real_</span>,</span>
+<span id="cb8-5">                      <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">converged =</span> <span class="cn" style="color: #8f5902;
+background-color: null;
+font-style: inherit;">FALSE</span>, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">stringsAsFactors =</span> <span class="cn" style="color: #8f5902;
+background-color: null;
+font-style: inherit;">FALSE</span>))</span>
+<span id="cb8-6">  }</span>
+<span id="cb8-7">  <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">data.frame</span>(</span>
+<span id="cb8-8">    <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">family    =</span> nm,</span>
+<span id="cb8-9">    <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">df        =</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">attr</span>(<span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">logLik</span>(x<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">$</span>fit), <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"df"</span>),</span>
+<span id="cb8-10">    <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">AIC       =</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">AIC</span>(x<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">$</span>fit),</span>
+<span id="cb8-11">    <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">converged =</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">isTRUE</span>(x<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">$</span>fit<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">$</span>sdr<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">$</span>pdHess),</span>
+<span id="cb8-12">    <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">stringsAsFactors =</span> <span class="cn" style="color: #8f5902;
+background-color: null;
+font-style: inherit;">FALSE</span></span>
+<span id="cb8-13">  )</span>
+<span id="cb8-14">})) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">|&gt;</span></span>
+<span id="cb8-15">  dplyr<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">::</span><span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">mutate</span>(<span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">dAIC =</span> AIC <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">-</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">min</span>(AIC, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">na.rm =</span> <span class="cn" style="color: #8f5902;
+background-color: null;
+font-style: inherit;">TRUE</span>)) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">|&gt;</span></span>
+<span id="cb8-16">  dplyr<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">::</span><span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">arrange</span>(<span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">is.na</span>(AIC), AIC)</span>
+<span id="cb8-17"></span>
+<span id="cb8-18">knitr<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">::</span><span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">kable</span>(compare_tbl, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">digits =</span> <span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">2</span>)</span></code></pre></div>
+</details>
+<div class="cell-output-display">
+<table class="caption-top table table-sm table-striped small">
+<thead>
+<tr class="header">
+<th style="text-align: left;">family</th>
+<th style="text-align: right;">df</th>
+<th style="text-align: right;">AIC</th>
+<th style="text-align: left;">converged</th>
+<th style="text-align: right;">dAIC</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td style="text-align: left;">cmb</td>
+<td style="text-align: right;">6</td>
+<td style="text-align: right;">894.63</td>
+<td style="text-align: left;">TRUE</td>
+<td style="text-align: right;">0.00</td>
+</tr>
+<tr class="even">
+<td style="text-align: left;">cmp</td>
+<td style="text-align: right;">6</td>
+<td style="text-align: right;">901.93</td>
+<td style="text-align: left;">TRUE</td>
+<td style="text-align: right;">7.30</td>
+</tr>
+<tr class="odd">
+<td style="text-align: left;">binomial</td>
+<td style="text-align: right;">3</td>
+<td style="text-align: right;">945.45</td>
+<td style="text-align: left;">TRUE</td>
+<td style="text-align: right;">50.81</td>
+</tr>
+<tr class="even">
+<td style="text-align: left;">bb</td>
+<td style="text-align: right;">6</td>
+<td style="text-align: right;">NA</td>
+<td style="text-align: left;">FALSE</td>
+<td style="text-align: right;">NA</td>
+</tr>
+</tbody>
+</table>
+</div>
+</div>
+<p>CMB wins. CMP-offset comes in a respectable second, a little behind. Plain binomial sits at +51 AIC, which is the expected penalty for a model with no dispersion structure at all. And beta-binomial does not finish: the row shows <code>converged = FALSE</code> and <code>AIC = NA</code>. The optimizer did not trip on a numerical artifact, it ran into the rho ≥ 0 wall and could not find any set of parameter values that simultaneously fit all three groups. BB is the delicate flower here, it wilts from the slightest whiff of underdispersion dragging the whole fit along.</p>
+<div class="cell">
+<details class="code-fold">
+<summary>Show code</summary>
+<div class="sourceCode cell-code" id="cb9" style="background: #f1f3f5;"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb9-1">cmb_nu_by_group <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> <span class="cf" style="color: #003B4F;
+background-color: null;
+font-weight: bold;
+font-style: inherit;">function</span>(fit, groups) {</span>
+<span id="cb9-2">  grid <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">data.frame</span>(<span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">group =</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">factor</span>(groups, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">levels =</span> groups))</span>
+<span id="cb9-3">  X    <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">model.matrix</span>(<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">~</span> group, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">data =</span> grid)</span>
+<span id="cb9-4">  beta <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">fixef</span>(fit)<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">$</span>disp</span>
+<span id="cb9-5">  V    <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">vcov</span>(fit)<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">$</span>disp</span>
+<span id="cb9-6">  eta  <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">as.vector</span>(X <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">%*%</span> beta)</span>
+<span id="cb9-7">  se   <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">sqrt</span>(<span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">diag</span>(X <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">%*%</span> V <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">%*%</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">t</span>(X)))</span>
+<span id="cb9-8">  grid <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">|&gt;</span></span>
+<span id="cb9-9">    dplyr<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">::</span><span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">mutate</span>(</span>
+<span id="cb9-10">      <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">nu_hat =</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">exp</span>(eta),</span>
+<span id="cb9-11">      <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">lower  =</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">exp</span>(eta <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">-</span> <span class="fl" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">1.96</span> <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">*</span> se),</span>
+<span id="cb9-12">      <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">upper  =</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">exp</span>(eta <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">+</span> <span class="fl" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">1.96</span> <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">*</span> se)</span>
+<span id="cb9-13">    )</span>
+<span id="cb9-14">}</span>
+<span id="cb9-15"></span>
+<span id="cb9-16">bb_rho_by_group <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> <span class="cf" style="color: #003B4F;
+background-color: null;
+font-weight: bold;
+font-style: inherit;">function</span>(fit, groups) {</span>
+<span id="cb9-17">  grid <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">data.frame</span>(<span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">group =</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">factor</span>(groups, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">levels =</span> groups))</span>
+<span id="cb9-18">  X    <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">model.matrix</span>(<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">~</span> group, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">data =</span> grid)</span>
+<span id="cb9-19">  beta <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">fixef</span>(fit)<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">$</span>disp</span>
+<span id="cb9-20">  V    <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">vcov</span>(fit)<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">$</span>disp</span>
+<span id="cb9-21">  eta  <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">as.vector</span>(X <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">%*%</span> beta)</span>
+<span id="cb9-22">  phi  <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">exp</span>(eta)</span>
+<span id="cb9-23">  grid <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">|&gt;</span></span>
+<span id="cb9-24">    dplyr<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">::</span><span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">mutate</span>(</span>
+<span id="cb9-25">      <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">phi          =</span> phi,</span>
+<span id="cb9-26">      <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">rho_overdisp =</span> <span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">1</span> <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">/</span> (<span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">1</span> <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">+</span> phi),</span>
+<span id="cb9-27">      <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">at_boundary  =</span> phi <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">&gt;</span> <span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">50</span></span>
+<span id="cb9-28">    )</span>
+<span id="cb9-29">}</span>
+<span id="cb9-30"></span>
+<span id="cb9-31">nu_tbl  <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">cmb_nu_by_group</span>(fits<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">$</span>cmb<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">$</span>fit, <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">c</span>(<span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"over"</span>, <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"binomial"</span>, <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"under"</span>))</span>
+<span id="cb9-32">nu_tbl<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">$</span>nu_true <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> nu_true[<span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">c</span>(<span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"over"</span>, <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"binomial"</span>, <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"under"</span>)]</span>
+<span id="cb9-33"></span>
+<span id="cb9-34">rho_tbl <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">bb_rho_by_group</span>(fits<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">$</span>bb<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">$</span>fit, <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">c</span>(<span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"over"</span>, <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"binomial"</span>, <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"under"</span>))</span>
+<span id="cb9-35"></span>
+<span id="cb9-36">knitr<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">::</span><span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">kable</span>(nu_tbl, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">digits =</span> <span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">3</span>,</span>
+<span id="cb9-37">             <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">caption =</span> <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"CMB ν estimates against simulated truth"</span>)</span></code></pre></div>
+</details>
+<div class="cell-output-display">
+<table class="caption-top table table-sm table-striped small">
+<caption>CMB ν estimates against simulated truth</caption>
+<thead>
+<tr class="header">
+<th style="text-align: left;">group</th>
+<th style="text-align: right;">nu_hat</th>
+<th style="text-align: right;">lower</th>
+<th style="text-align: right;">upper</th>
+<th style="text-align: right;">nu_true</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td style="text-align: left;">over</td>
+<td style="text-align: right;">0.410</td>
+<td style="text-align: right;">0.281</td>
+<td style="text-align: right;">0.598</td>
+<td style="text-align: right;">0.5</td>
+</tr>
+<tr class="even">
+<td style="text-align: left;">binomial</td>
+<td style="text-align: right;">0.714</td>
+<td style="text-align: right;">0.494</td>
+<td style="text-align: right;">1.030</td>
+<td style="text-align: right;">1.0</td>
+</tr>
+<tr class="odd">
+<td style="text-align: left;">under</td>
+<td style="text-align: right;">2.791</td>
+<td style="text-align: right;">1.947</td>
+<td style="text-align: right;">4.000</td>
+<td style="text-align: right;">2.0</td>
+</tr>
+</tbody>
+</table>
+</div>
+<details class="code-fold">
+<summary>Show code</summary>
+<div class="sourceCode cell-code" id="cb10" style="background: #f1f3f5;"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb10-1">knitr<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">::</span><span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">kable</span>(rho_tbl, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">digits =</span> <span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">3</span>,</span>
+<span id="cb10-2">             <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">caption =</span> <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"Beta-binomial ρ by group, with boundary flag"</span>)</span></code></pre></div>
+</details>
+<div class="cell-output-display">
+<table class="caption-top table table-sm table-striped small">
+<caption>Beta-binomial ρ by group, with boundary flag</caption>
+<thead>
+<tr class="header">
+<th style="text-align: left;">group</th>
+<th style="text-align: right;">phi</th>
+<th style="text-align: right;">rho_overdisp</th>
+<th style="text-align: left;">at_boundary</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td style="text-align: left;">over</td>
+<td style="text-align: right;">20.982</td>
+<td style="text-align: right;">0.045</td>
+<td style="text-align: left;">FALSE</td>
+</tr>
+<tr class="even">
+<td style="text-align: left;">binomial</td>
+<td style="text-align: right;">76.442</td>
+<td style="text-align: right;">0.013</td>
+<td style="text-align: left;">TRUE</td>
+</tr>
+<tr class="odd">
+<td style="text-align: left;">under</td>
+<td style="text-align: right;">62271613.949</td>
+<td style="text-align: right;">0.000</td>
+<td style="text-align: left;">TRUE</td>
+</tr>
+</tbody>
+</table>
+</div>
+</div>
+<p>CMB recovery is decent: every 95% interval covers its simulated truth, and the point estimates land in the right neighborhood. At sixty observations per group with moderate effect sizes, that is about what we should expect.</p>
+<p>The beta-binomial table tells two stories at once. On the overdispersed group, BB does its job: rho is 0.045 and the boundary flag is <code>FALSE</code>. On the binomial group, BB pushes rho down to 0.013 and trips <code>at_boundary = TRUE</code>, which is correct behavior. There is no overdispersion to estimate, so the family collapses toward the binomial limit, and that is what we want. The underdispersed group is where things break. Phi explodes to about 6 x 10^7 and rho goes to zero, not because BB has discovered “very little overdispersion” but because the optimizer is running off to infinity in search of a parameter value that does not exist in the family. Combined with the <code>converged = FALSE</code> we saw in the AIC table, this is what hitting the rho &gt;= 0 wall looks like in practice. The two boundary hits look identical in the table and mean opposite things: one is the family doing the right thing, the other is the family unable to do anything at all.</p>
+<p>A picture of the recovery:</p>
+<div class="cell">
+<details class="code-fold">
+<summary>Show code</summary>
+<div class="sourceCode cell-code" id="cb11" style="background: #f1f3f5;"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb11-1"><span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">ggplot</span>(nu_tbl, <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">aes</span>(<span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">x =</span> nu_hat, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">y =</span> group)) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">+</span></span>
+<span id="cb11-2">  <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">geom_vline</span>(<span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">xintercept =</span> <span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">1</span>, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">linetype =</span> <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"dashed"</span>, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">color =</span> <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"grey45"</span>) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">+</span></span>
+<span id="cb11-3">  <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">geom_pointrange</span>(<span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">aes</span>(<span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">xmin =</span> lower, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">xmax =</span> upper), <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">linewidth =</span> <span class="fl" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">0.8</span>) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">+</span></span>
+<span id="cb11-4">  <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">geom_point</span>(<span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">aes</span>(<span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">x =</span> nu_true), <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">color =</span> <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"#d7191c"</span>, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">shape =</span> <span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">4</span>,</span>
+<span id="cb11-5">             <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">size =</span> <span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">4</span>, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">stroke =</span> <span class="fl" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">1.5</span>) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">+</span></span>
+<span id="cb11-6">  <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">scale_x_log10</span>() <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">+</span></span>
+<span id="cb11-7">  <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">labs</span>(<span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">x =</span> <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"CMB ν estimate (log scale, with 95% CI)"</span>,</span>
+<span id="cb11-8">       <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">y =</span> <span class="cn" style="color: #8f5902;
+background-color: null;
+font-style: inherit;">NULL</span>,</span>
+<span id="cb11-9">       <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">title =</span> <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"Simulated truth (red crosses) vs CMB estimate (black)"</span>)</span></code></pre></div>
+</details>
+<div class="cell-output-display">
+<div class="quarto-figure quarto-figure-center">
+<figure class="figure">
+<p><img src="https://jbogomolovas2.github.io/Julius-s-Blog/posts/CMB_regression/index_files/figure-html/sim-nu-plot-1.png" class="img-fluid figure-img" width="960"></p>
+<figcaption>CMB ν estimates with 95% confidence intervals, against the simulated values (red crosses). The dashed vertical line is the binomial baseline. CMB hits all three regimes.</figcaption>
+</figure>
+</div>
+</div>
+</div>
+<p>And finally, the practical payoff: what does the confidence interval on the group mean look like under each model?</p>
+<div class="cell">
+<details class="code-fold">
+<summary>Show code</summary>
+<div class="sourceCode cell-code" id="cb12" style="background: #f1f3f5;"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb12-1">ci_widths <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> dplyr<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">::</span><span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">bind_rows</span>(<span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">lapply</span>(<span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">c</span>(<span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"binomial"</span>, <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"bb"</span>, <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"cmb"</span>), <span class="cf" style="color: #003B4F;
+background-color: null;
+font-weight: bold;
+font-style: inherit;">function</span>(m) {</span>
+<span id="cb12-2">  f <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> fits[[m]]<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">$</span>fit</span>
+<span id="cb12-3">  <span class="cf" style="color: #003B4F;
+background-color: null;
+font-weight: bold;
+font-style: inherit;">if</span> (<span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">is.null</span>(f)) <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">return</span>(<span class="cn" style="color: #8f5902;
+background-color: null;
+font-style: inherit;">NULL</span>)</span>
+<span id="cb12-4">  <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">as.data.frame</span>(emmeans<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">::</span><span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">emmeans</span>(f, <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">~</span> group, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">type =</span> <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"response"</span>)) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">|&gt;</span></span>
+<span id="cb12-5">    dplyr<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">::</span><span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">mutate</span>(<span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">model =</span> m, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">ci_width =</span> asymp.UCL <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">-</span> asymp.LCL)</span>
+<span id="cb12-6">}))</span>
+<span id="cb12-7"></span>
+<span id="cb12-8">ci_widths <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">|&gt;</span></span>
+<span id="cb12-9">  dplyr<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">::</span><span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">select</span>(group, model, ci_width) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">|&gt;</span></span>
+<span id="cb12-10">  tidyr<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">::</span><span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">pivot_wider</span>(<span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">names_from =</span> model, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">values_from =</span> ci_width,</span>
+<span id="cb12-11">                     <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">names_prefix =</span> <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"ci_"</span>) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">|&gt;</span></span>
+<span id="cb12-12">  knitr<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">::</span><span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">kable</span>(<span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">digits =</span> <span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">4</span>,</span>
+<span id="cb12-13">               <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">caption =</span> <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"95% CI widths on the per-group mean rate"</span>)</span></code></pre></div>
+</details>
+<div class="cell-output-display">
+<table class="caption-top table table-sm table-striped small">
+<caption>95% CI widths on the per-group mean rate</caption>
+<thead>
+<tr class="header">
+<th style="text-align: left;">group</th>
+<th style="text-align: right;">ci_binomial</th>
+<th style="text-align: right;">ci_bb</th>
+<th style="text-align: right;">ci_cmb</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td style="text-align: left;">over</td>
+<td style="text-align: right;">0.0461</td>
+<td style="text-align: right;">0.0701</td>
+<td style="text-align: right;">0.0701</td>
+</tr>
+<tr class="even">
+<td style="text-align: left;">binomial</td>
+<td style="text-align: right;">0.0461</td>
+<td style="text-align: right;">0.0541</td>
+<td style="text-align: right;">0.0542</td>
+</tr>
+<tr class="odd">
+<td style="text-align: left;">under</td>
+<td style="text-align: right;">0.0462</td>
+<td style="text-align: right;">0.0462</td>
+<td style="text-align: right;">0.0279</td>
+</tr>
+</tbody>
+</table>
+</div>
+</div>
+<p>Same data, three stories. If the group is overdispersed, BB and CMB both recognize it and widen the CI. If the group is underdispersed, only CMB recognizes it; BB cannot, because its dispersion floor is rho = 0. That is the asymmetry. Beta-binomial sees half the dispersion landscape. CMB sees both halves.</p>
+</section>
+</section>
+<section id="the-coral-fertilization-study" class="level2">
+<h2 class="anchored" data-anchor-id="the-coral-fertilization-study">The coral fertilization study</h2>
+<p>The simulated example showed CMB doing its job on data we built. The next test is real data, where there is no simulated truth, no guarantee any family fits well, and the biology might or might not be visible once the statistical work is done.</p>
+<p>The dataset comes from Puisay et al. <span class="citation" data-cites="puisay2024coral">(Puisay et al. 2024)</span>, <a href="https://www.sciencedirect.com/science/article/abs/pii/S0022098123000527">How thermal priming of coral gametes shapes fertilization success</a>, with the raw spreadsheet publicly archived on <a href="https://zenodo.org/records/8032395">Zenodo</a> <span class="citation" data-cites="puisay2024coral_data">(Puisay et al. 2023)</span>. The original study asked whether pre-exposing the gametes of a broadcast-spawning coral (<em>Acropora cytherea</em>) to elevated temperature, before fertilization, can rescue fertilization success when fertilization itself occurs at warmer ocean temperatures.</p>
+<section id="the-question" class="level3">
+<h3 class="anchored" data-anchor-id="the-question">The question</h3>
+<p>The experiment is a clean 2 × 2 × 2 × 4 factorial. Each replicate vial holds a known number of eggs (range 33 to 457, mean about 160) and a controlled batch of sperm, under these conditions:</p>
+<ul>
+<li>Sperm pre-exposed at 27°C or 30°C</li>
+<li>Oocytes pre-exposed at 27°C or 30°C</li>
+<li>Pre-exposure lasting 0.5, 1, 1.5, or 2 hours</li>
+<li>Fertilization itself carried out at either 27°C (control) or 30°C (warm, the climate-change scenario)</li>
+</ul>
+<p>The outcome is the count of embryos that developed normally (2-cell, 4-cell, or more-cell stage) out of the total eggs scored. Six replicates per cell, 192 vials in total, and just over 30,000 eggs scored. This is a textbook bounded count: <code>y</code> successes out of <code>n</code> trials, with <code>n</code> known per vial.</p>
+</section>
+<section id="how-they-analyzed-it" class="level3">
+<h3 class="anchored" data-anchor-id="how-they-analyzed-it">How they analyzed it</h3>
+<p>The authors fit a binomial-style GLM, but with a twist that matters here. They applied an arcsine square-root transformation to the proportions, then ran <code>glm()</code> on the transformed values. This is one of the three workarounds for proportion data that section 2 listed: throw away the bounded discrete structure, get coefficients on a scale that does not map cleanly back to rates, and accept that you cannot model dispersion separately from the mean. It is what people reach for when proportion data misbehave and there is no proper bounded-count family with dispersion structure in the toolkit they are using.</p>
+<p>The authors noticed that dispersion in their data was doing something interesting. From their discussion section:</p>
+<blockquote class="blockquote">
+<p>“Interestingly, all things being equal, the fertilization success was more variable at 30°C, which may indicate opportunity for selection during the fertilization success. Furthermore, when considering the particular treatment where the thermal priming of gametes increased the fertilization success at 30°C, we observed a reduction of the variation of the fertilization success […] This experimental reduction in the variation of the fertilization success may imply that selection occurred on a pool of diverse gametes.”</p>
+</blockquote>
+<p>This is exactly the kind of observation a CMB model is built to formalize. Warm fertilization produces more variable outcomes than control. Successful priming both raises the mean and reduces the variability. Their analysis let them comment on this qualitatively in the discussion but did not let them attach a number to it, give it a confidence interval, or test it formally against the mean structure. They could see the dispersion pattern but could not model it.</p>
+</section>
+<section id="how-we-analyze-it" class="level3">
+<h3 class="anchored" data-anchor-id="how-we-analyze-it">How we analyze it</h3>
+<p>Same mean structure as theirs (a three-way interaction of fertilization temperature, pre-exposure time, and the cross of sperm × oocyte priming), but with three changes. First, we go back to the proper binomial scale via <code>cbind(y, n - y)</code>, no transformation. Second, we use <code>family = compbinomial</code> and let <code>dispformula = ~ fert_temp * treatment</code> model the dispersion across the eight (fert_temp × treatment) cells. Third, we add <code>(1 | site)</code> to capture shared variation across the two fertilization-temperature samples drawn from the same pre-exposure batch. We then compare the same set of candidate families introduced in the simulated example.</p>
+</section>
+<section id="loading-the-data" class="level3">
+<h3 class="anchored" data-anchor-id="loading-the-data">Loading the data</h3>
+<div class="cell">
+<details class="code-fold">
+<summary>Show code</summary>
+<div class="sourceCode cell-code" id="cb13" style="background: #f1f3f5;"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb13-1"><span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">library</span>(readxl)</span>
+<span id="cb13-2"><span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">library</span>(glmmTMB)</span>
+<span id="cb13-3"><span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">library</span>(emmeans)</span>
+<span id="cb13-4"></span>
+<span id="cb13-5">raw <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">read_excel</span>(<span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"/Users/jb/Downloads/DATA (1).xlsx"</span>,</span>
+<span id="cb13-6">                  <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">sheet =</span> <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"GLM models data 2014"</span>,</span>
+<span id="cb13-7">                  <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">skip  =</span> <span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">1</span>)</span>
+<span id="cb13-8"></span>
+<span id="cb13-9">mod_data <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> raw <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">|&gt;</span></span>
+<span id="cb13-10">  dplyr<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">::</span><span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">transmute</span>(</span>
+<span id="cb13-11">    <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">site      =</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">factor</span>(Site),</span>
+<span id="cb13-12">    <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">fert_temp =</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">factor</span>(Temp,    <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">levels =</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">c</span>(<span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">27</span>, <span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">30</span>)),</span>
+<span id="cb13-13">    <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">temp_s    =</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">factor</span>(<span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">`</span><span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">Temp S</span><span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">`</span>, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">levels =</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">c</span>(<span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">27</span>, <span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">30</span>)),</span>
+<span id="cb13-14">    <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">temp_o    =</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">factor</span>(<span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">`</span><span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">Temp O</span><span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">`</span>, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">levels =</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">c</span>(<span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">27</span>, <span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">30</span>)),</span>
+<span id="cb13-15">    <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">time      =</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">as.numeric</span>(time),</span>
+<span id="cb13-16">    <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">n         =</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">as.integer</span>(total),</span>
+<span id="cb13-17">    <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">y         =</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">as.integer</span>(<span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">`</span><span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">2 Cells</span><span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">`</span>) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">+</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">as.integer</span>(<span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">`</span><span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">4 Cells</span><span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">`</span>) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">+</span></span>
+<span id="cb13-18">                <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">as.integer</span>(<span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">`</span><span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">More Cells</span><span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">`</span>)</span>
+<span id="cb13-19">  ) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">|&gt;</span></span>
+<span id="cb13-20">  dplyr<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">::</span><span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">mutate</span>(</span>
+<span id="cb13-21">    <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">miss      =</span> n <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">-</span> y,</span>
+<span id="cb13-22">    <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">treatment =</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">factor</span>(<span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">paste0</span>(<span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"O"</span>, temp_o, <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"S"</span>, temp_s),</span>
+<span id="cb13-23">                       <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">levels =</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">c</span>(<span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"O27S27"</span>, <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"O27S30"</span>, <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"O30S27"</span>, <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"O30S30"</span>))</span>
+<span id="cb13-24">  )</span>
+<span id="cb13-25"></span>
+<span id="cb13-26"><span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">c</span>(<span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">rows =</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">nrow</span>(mod_data),</span>
+<span id="cb13-27">  <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">total_eggs =</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">sum</span>(mod_data<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">$</span>n),</span>
+<span id="cb13-28">  <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">total_fertilized =</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">sum</span>(mod_data<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">$</span>y),</span>
+<span id="cb13-29">  <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">overall_rate =</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">round</span>(<span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">sum</span>(mod_data<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">$</span>y) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">/</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">sum</span>(mod_data<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">$</span>n), <span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">3</span>))</span></code></pre></div>
+</details>
+<div class="cell-output cell-output-stdout">
+<pre><code>            rows       total_eggs total_fertilized     overall_rate 
+         192.000        30465.000        25458.000            0.836 </code></pre>
+</div>
+</div>
+</section>
+<section id="a-model-free-look-at-dispersion" class="level3">
+<h3 class="anchored" data-anchor-id="a-model-free-look-at-dispersion">A model-free look at dispersion</h3>
+<p>Before fitting anything, we check whether the data really do have heterogeneous dispersion across treatments. For each of the 32 treatment cells (2 fertilization temps × 4 priming treatments × 4 pre-exposure times, 6 replicates each), we compute a model-free binomial-index-of-dispersion: the Pearson chi-square against a binomial null with the cell’s own mean rate, divided by degrees of freedom. Values above 1 indicate overdispersion, below 1 indicate underdispersion.</p>
+<div class="cell">
+<details class="code-fold">
+<summary>Show code</summary>
+<div class="sourceCode cell-code" id="cb15" style="background: #f1f3f5;"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb15-1">bid_screen <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> mod_data <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">|&gt;</span></span>
+<span id="cb15-2">  dplyr<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">::</span><span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">group_by</span>(fert_temp, treatment, time) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">|&gt;</span></span>
+<span id="cb15-3">  dplyr<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">::</span><span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">summarise</span>(</span>
+<span id="cb15-4">    <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">p_bar =</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">sum</span>(y) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">/</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">sum</span>(n),</span>
+<span id="cb15-5">    <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">BID   =</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">sum</span>((y <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">-</span> n <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">*</span> p_bar)<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">^</span><span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">2</span> <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">/</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">pmax</span>(n <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">*</span> p_bar <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">*</span> (<span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">1</span> <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">-</span> p_bar), <span class="fl" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">1e-8</span>)) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">/</span></span>
+<span id="cb15-6">              (dplyr<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">::</span><span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">n</span>() <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">-</span> <span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">1</span>),</span>
+<span id="cb15-7">    <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">.groups =</span> <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"drop"</span></span>
+<span id="cb15-8">  )</span>
+<span id="cb15-9"></span>
+<span id="cb15-10">bid_screen <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">|&gt;</span></span>
+<span id="cb15-11">  dplyr<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">::</span><span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">group_by</span>(fert_temp) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">|&gt;</span></span>
+<span id="cb15-12">  dplyr<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">::</span><span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">summarise</span>(</span>
+<span id="cb15-13">    <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">cells       =</span> dplyr<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">::</span><span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">n</span>(),</span>
+<span id="cb15-14">    <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">min_BID     =</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">round</span>(<span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">min</span>(BID), <span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">2</span>),</span>
+<span id="cb15-15">    <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">median_BID  =</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">round</span>(<span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">median</span>(BID), <span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">2</span>),</span>
+<span id="cb15-16">    <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">max_BID     =</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">round</span>(<span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">max</span>(BID), <span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">2</span>),</span>
+<span id="cb15-17">    <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">pct_under_1 =</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">round</span>(<span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">mean</span>(BID <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">&lt;</span> <span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">1</span>), <span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">2</span>),</span>
+<span id="cb15-18">    <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">.groups =</span> <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"drop"</span></span>
+<span id="cb15-19">  ) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">|&gt;</span></span>
+<span id="cb15-20">  knitr<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">::</span><span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">kable</span>()</span></code></pre></div>
+</details>
+<div class="cell-output-display">
+<table class="caption-top table table-sm table-striped small">
+<thead>
+<tr class="header">
+<th style="text-align: left;">fert_temp</th>
+<th style="text-align: right;">cells</th>
+<th style="text-align: right;">min_BID</th>
+<th style="text-align: right;">median_BID</th>
+<th style="text-align: right;">max_BID</th>
+<th style="text-align: right;">pct_under_1</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td style="text-align: left;">27</td>
+<td style="text-align: right;">16</td>
+<td style="text-align: right;">0.18</td>
+<td style="text-align: right;">0.76</td>
+<td style="text-align: right;">7.05</td>
+<td style="text-align: right;">0.69</td>
+</tr>
+<tr class="even">
+<td style="text-align: left;">30</td>
+<td style="text-align: right;">16</td>
+<td style="text-align: right;">0.97</td>
+<td style="text-align: right;">4.63</td>
+<td style="text-align: right;">15.16</td>
+<td style="text-align: right;">0.12</td>
+</tr>
+</tbody>
+</table>
+</div>
+</div>
+<p>At control fertilization (27°C), the median BID is below 1 and 70% of cells sit on the underdispersed side, some quite strongly (minimum BID around 0.18). At warm fertilization (30°C), the median jumps to about 4.6, with the most extreme cells running up around 15. The data have heterogeneous, two-directional dispersion structure, exactly the regime CMB is designed for and exactly the regime BB cannot represent.</p>
+<p>A picture of all 32 cells:</p>
+<div class="cell">
+<details class="code-fold">
+<summary>Show code</summary>
+<div class="sourceCode cell-code" id="cb16" style="background: #f1f3f5;"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb16-1"><span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">ggplot</span>(bid_screen,</span>
+<span id="cb16-2">       <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">aes</span>(<span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">x =</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">factor</span>(time), <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">y =</span> BID, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">color =</span> fert_temp)) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">+</span></span>
+<span id="cb16-3">  <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">geom_hline</span>(<span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">yintercept =</span> <span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">1</span>, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">linetype =</span> <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"dashed"</span>, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">color =</span> <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"grey45"</span>) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">+</span></span>
+<span id="cb16-4">  <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">geom_point</span>(<span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">size =</span> <span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">3</span>) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">+</span></span>
+<span id="cb16-5">  <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">facet_wrap</span>(<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">~</span> treatment, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">nrow =</span> <span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">1</span>) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">+</span></span>
+<span id="cb16-6">  <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">scale_y_log10</span>() <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">+</span></span>
+<span id="cb16-7">  <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">scale_color_manual</span>(<span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">values =</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">c</span>(<span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"27"</span> <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">=</span> <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"#2c7bb6"</span>, <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"30"</span> <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">=</span> <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"#d7191c"</span>),</span>
+<span id="cb16-8">                     <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">name =</span> <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"Fertilization °C"</span>) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">+</span></span>
+<span id="cb16-9">  <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">labs</span>(<span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">x =</span> <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"Pre-exposure time (h)"</span>,</span>
+<span id="cb16-10">       <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">y =</span> <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"BID (log scale)"</span>,</span>
+<span id="cb16-11">       <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">title =</span> <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"Model-free dispersion screen by treatment"</span>)</span></code></pre></div>
+</details>
+<div class="cell-output-display">
+<div class="quarto-figure quarto-figure-center">
+<figure class="figure">
+<p><img src="https://jbogomolovas2.github.io/Julius-s-Blog/posts/CMB_regression/index_files/figure-html/coral-bid-plot-1.png" class="img-fluid figure-img" width="960"></p>
+<figcaption>Model-free dispersion screen by treatment. Cells above the dashed line are overdispersed, below are underdispersed. Warm fertilization (red) sits almost entirely above; control (blue) sits mostly below.</figcaption>
+</figure>
+</div>
+</div>
+</div>
+</section>
+<section id="fitting-six-candidates" class="level3">
+<h3 class="anchored" data-anchor-id="fitting-six-candidates">Fitting six candidates</h3>
+<p>Six families this time. The four from the simulated section, plus the two constant-dispersion variants (beta-binomial and CMB with <code>dispformula = ~ 1</code>) to confirm that the by-treatment dispersion submodel earns its degrees of freedom on real data. Random intercept on site captures shared variation across the two fertilization-temperature samples drawn from each pre-exposure batch.</p>
+<div class="cell">
+<details class="code-fold">
+<summary>Show code</summary>
+<div class="sourceCode cell-code" id="cb17" style="background: #f1f3f5;"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb17-1">safe_fit <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> <span class="cf" style="color: #003B4F;
+background-color: null;
+font-weight: bold;
+font-style: inherit;">function</span>(expr) {</span>
+<span id="cb17-2">  <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">tryCatch</span>(</span>
+<span id="cb17-3">    <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">list</span>(<span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">fit =</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">eval.parent</span>(<span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">substitute</span>(expr)), <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">error =</span> <span class="cn" style="color: #8f5902;
+background-color: null;
+font-style: inherit;">NA_character_</span>),</span>
+<span id="cb17-4">    <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">error =</span> <span class="cf" style="color: #003B4F;
+background-color: null;
+font-weight: bold;
+font-style: inherit;">function</span>(e) <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">list</span>(<span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">fit =</span> <span class="cn" style="color: #8f5902;
+background-color: null;
+font-style: inherit;">NULL</span>, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">error =</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">conditionMessage</span>(e))</span>
+<span id="cb17-5">  )</span>
+<span id="cb17-6">}</span>
+<span id="cb17-7"></span>
+<span id="cb17-8">form_bound <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">cbind</span>(y, miss) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">~</span> fert_temp <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">*</span> time <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">*</span> treatment <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">+</span> (<span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">1</span> <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">|</span> site)</span>
+<span id="cb17-9">form_cmp   <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> y <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">~</span> fert_temp <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">*</span> time <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">*</span> treatment <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">+</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">offset</span>(<span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">log</span>(n)) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">+</span> (<span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">1</span> <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">|</span> site)</span>
+<span id="cb17-10"></span>
+<span id="cb17-11">fits <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">list</span>(</span>
+<span id="cb17-12">  <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">binomial      =</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">safe_fit</span>(<span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">glmmTMB</span>(form_bound, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">family =</span> binomial, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">data =</span> mod_data)),</span>
+<span id="cb17-13">  <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">bb_constant   =</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">safe_fit</span>(<span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">glmmTMB</span>(form_bound, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">family =</span> betabinomial,</span>
+<span id="cb17-14">                                   <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">dispformula =</span> <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">~</span> <span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">1</span>, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">data =</span> mod_data)),</span>
+<span id="cb17-15">  <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">bb_by_treat   =</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">safe_fit</span>(<span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">glmmTMB</span>(form_bound, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">family =</span> betabinomial,</span>
+<span id="cb17-16">                                   <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">dispformula =</span> <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">~</span> fert_temp <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">*</span> treatment, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">data =</span> mod_data)),</span>
+<span id="cb17-17">  <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">cmp_offset    =</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">safe_fit</span>(<span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">glmmTMB</span>(form_cmp,   <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">family =</span> compois,</span>
+<span id="cb17-18">                                   <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">dispformula =</span> <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">~</span> fert_temp <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">*</span> treatment, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">data =</span> mod_data)),</span>
+<span id="cb17-19">  <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">cmb_constant  =</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">safe_fit</span>(<span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">glmmTMB</span>(form_bound, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">family =</span> compbinomial,</span>
+<span id="cb17-20">                                   <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">dispformula =</span> <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">~</span> <span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">1</span>, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">data =</span> mod_data)),</span>
+<span id="cb17-21">  <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">cmb_by_treat  =</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">safe_fit</span>(<span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">glmmTMB</span>(form_bound, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">family =</span> compbinomial,</span>
+<span id="cb17-22">                                   <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">dispformula =</span> <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">~</span> fert_temp <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">*</span> treatment, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">data =</span> mod_data))</span>
+<span id="cb17-23">)</span></code></pre></div>
+</details>
+<div class="cell-output cell-output-stderr">
+<pre><code>Warning in finalizeTMB(TMBStruc, obj, fit, h, data.tmb.old): Model convergence
+problem; non-positive-definite Hessian matrix. See vignette('troubleshooting')</code></pre>
+</div>
+<div class="cell-output cell-output-stderr">
+<pre><code>Warning in finalizeTMB(TMBStruc, obj, fit, h, data.tmb.old): Model convergence
+problem; false convergence (8). See vignette('troubleshooting'),
+help('diagnose')</code></pre>
+</div>
+</div>
+<div class="cell">
+<details class="code-fold">
+<summary>Show code</summary>
+<div class="sourceCode cell-code" id="cb20" style="background: #f1f3f5;"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb20-1">compare_tbl <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> dplyr<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">::</span><span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">bind_rows</span>(<span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">lapply</span>(<span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">names</span>(fits), <span class="cf" style="color: #003B4F;
+background-color: null;
+font-weight: bold;
+font-style: inherit;">function</span>(nm) {</span>
+<span id="cb20-2">  x <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> fits[[nm]]</span>
+<span id="cb20-3">  <span class="cf" style="color: #003B4F;
+background-color: null;
+font-weight: bold;
+font-style: inherit;">if</span> (<span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">is.null</span>(x<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">$</span>fit)) {</span>
+<span id="cb20-4">    <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">return</span>(<span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">data.frame</span>(<span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">family =</span> nm, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">df =</span> <span class="cn" style="color: #8f5902;
+background-color: null;
+font-style: inherit;">NA_real_</span>, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">AIC =</span> <span class="cn" style="color: #8f5902;
+background-color: null;
+font-style: inherit;">NA_real_</span>,</span>
+<span id="cb20-5">                      <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">converged =</span> <span class="cn" style="color: #8f5902;
+background-color: null;
+font-style: inherit;">FALSE</span>, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">stringsAsFactors =</span> <span class="cn" style="color: #8f5902;
+background-color: null;
+font-style: inherit;">FALSE</span>))</span>
+<span id="cb20-6">  }</span>
+<span id="cb20-7">  <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">data.frame</span>(</span>
+<span id="cb20-8">    <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">family    =</span> nm,</span>
+<span id="cb20-9">    <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">df        =</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">attr</span>(<span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">logLik</span>(x<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">$</span>fit), <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"df"</span>),</span>
+<span id="cb20-10">    <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">AIC       =</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">AIC</span>(x<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">$</span>fit),</span>
+<span id="cb20-11">    <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">converged =</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">isTRUE</span>(x<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">$</span>fit<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">$</span>sdr<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">$</span>pdHess),</span>
+<span id="cb20-12">    <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">stringsAsFactors =</span> <span class="cn" style="color: #8f5902;
+background-color: null;
+font-style: inherit;">FALSE</span></span>
+<span id="cb20-13">  )</span>
+<span id="cb20-14">})) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">|&gt;</span></span>
+<span id="cb20-15">  dplyr<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">::</span><span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">mutate</span>(<span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">dAIC =</span> AIC <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">-</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">min</span>(AIC, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">na.rm =</span> <span class="cn" style="color: #8f5902;
+background-color: null;
+font-style: inherit;">TRUE</span>)) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">|&gt;</span></span>
+<span id="cb20-16">  dplyr<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">::</span><span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">arrange</span>(<span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">is.na</span>(AIC), AIC)</span>
+<span id="cb20-17"></span>
+<span id="cb20-18">knitr<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">::</span><span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">kable</span>(compare_tbl, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">digits =</span> <span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">2</span>)</span></code></pre></div>
+</details>
+<div class="cell-output-display">
+<table class="caption-top table table-sm table-striped small">
+<thead>
+<tr class="header">
+<th style="text-align: left;">family</th>
+<th style="text-align: right;">df</th>
+<th style="text-align: right;">AIC</th>
+<th style="text-align: left;">converged</th>
+<th style="text-align: right;">dAIC</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td style="text-align: left;">cmb_by_treat</td>
+<td style="text-align: right;">25</td>
+<td style="text-align: right;">1308.82</td>
+<td style="text-align: left;">TRUE</td>
+<td style="text-align: right;">0.00</td>
+</tr>
+<tr class="even">
+<td style="text-align: left;">cmp_offset</td>
+<td style="text-align: right;">25</td>
+<td style="text-align: right;">1327.89</td>
+<td style="text-align: left;">TRUE</td>
+<td style="text-align: right;">19.07</td>
+</tr>
+<tr class="odd">
+<td style="text-align: left;">cmb_constant</td>
+<td style="text-align: right;">18</td>
+<td style="text-align: right;">1356.92</td>
+<td style="text-align: left;">TRUE</td>
+<td style="text-align: right;">48.10</td>
+</tr>
+<tr class="even">
+<td style="text-align: left;">bb_constant</td>
+<td style="text-align: right;">18</td>
+<td style="text-align: right;">1357.98</td>
+<td style="text-align: left;">TRUE</td>
+<td style="text-align: right;">49.16</td>
+</tr>
+<tr class="odd">
+<td style="text-align: left;">binomial</td>
+<td style="text-align: right;">17</td>
+<td style="text-align: right;">1594.79</td>
+<td style="text-align: left;">TRUE</td>
+<td style="text-align: right;">285.97</td>
+</tr>
+<tr class="even">
+<td style="text-align: left;">bb_by_treat</td>
+<td style="text-align: right;">25</td>
+<td style="text-align: right;">NA</td>
+<td style="text-align: left;">FALSE</td>
+<td style="text-align: right;">NA</td>
+</tr>
+</tbody>
+</table>
+</div>
+</div>
+<p>Binomial sits at +286 AIC, which is the price of ignoring the dispersion structure entirely. Among the families that try to model dispersion, CMB-by-treatment wins by 19 AIC over CMP-offset and by 48 over the constant-dispersion variants. CMP-offset finishes second, which is honest: at the rates and trial sizes here (rates 0.46 to 0.97, trial sizes 33 to 457), the upper bound is not strongly binding for most cells, so the unbounded-count approximation is not catastrophic. It still loses to CMB by a clear margin. Beta-binomial with by-treatment dispersion did not converge, as the simulated example predicted.</p>
+</section>
+<section id="what-cmb-found-about-dispersion" class="level3">
+<h3 class="anchored" data-anchor-id="what-cmb-found-about-dispersion">What CMB found about dispersion</h3>
+<div class="cell">
+<details class="code-fold">
+<summary>Show code</summary>
+<div class="sourceCode cell-code" id="cb21" style="background: #f1f3f5;"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb21-1">disp_grid <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">expand.grid</span>(</span>
+<span id="cb21-2">  <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">fert_temp =</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">factor</span>(<span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">c</span>(<span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">27</span>, <span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">30</span>), <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">levels =</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">c</span>(<span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">27</span>, <span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">30</span>)),</span>
+<span id="cb21-3">  <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">treatment =</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">factor</span>(<span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">c</span>(<span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"O27S27"</span>, <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"O27S30"</span>, <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"O30S27"</span>, <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"O30S30"</span>),</span>
+<span id="cb21-4">                     <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">levels =</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">c</span>(<span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"O27S27"</span>, <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"O27S30"</span>, <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"O30S27"</span>, <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"O30S30"</span>))</span>
+<span id="cb21-5">)</span>
+<span id="cb21-6"></span>
+<span id="cb21-7">cmb_nu_by_cell <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> <span class="cf" style="color: #003B4F;
+background-color: null;
+font-weight: bold;
+font-style: inherit;">function</span>(fit, grid) {</span>
+<span id="cb21-8">  X    <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">model.matrix</span>(<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">~</span> fert_temp <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">*</span> treatment, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">data =</span> grid)</span>
+<span id="cb21-9">  beta <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">fixef</span>(fit)<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">$</span>disp</span>
+<span id="cb21-10">  V    <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">vcov</span>(fit)<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">$</span>disp</span>
+<span id="cb21-11">  eta  <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">as.vector</span>(X <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">%*%</span> beta)</span>
+<span id="cb21-12">  se   <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">sqrt</span>(<span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">diag</span>(X <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">%*%</span> V <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">%*%</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">t</span>(X)))</span>
+<span id="cb21-13">  grid <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">|&gt;</span></span>
+<span id="cb21-14">    dplyr<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">::</span><span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">mutate</span>(</span>
+<span id="cb21-15">      <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">nu_hat =</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">exp</span>(eta),</span>
+<span id="cb21-16">      <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">lower  =</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">exp</span>(eta <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">-</span> <span class="fl" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">1.96</span> <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">*</span> se),</span>
+<span id="cb21-17">      <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">upper  =</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">exp</span>(eta <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">+</span> <span class="fl" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">1.96</span> <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">*</span> se)</span>
+<span id="cb21-18">    )</span>
+<span id="cb21-19">}</span>
+<span id="cb21-20"></span>
+<span id="cb21-21">knitr<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">::</span><span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">kable</span>(</span>
+<span id="cb21-22">  <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">cmb_nu_by_cell</span>(fits<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">$</span>cmb_by_treat<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">$</span>fit, disp_grid),</span>
+<span id="cb21-23">  <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">digits =</span> <span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">3</span>,</span>
+<span id="cb21-24">  <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">caption =</span> <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"CMB ν by treatment cell"</span></span>
+<span id="cb21-25">)</span></code></pre></div>
+</details>
+<div class="cell-output-display">
+<table class="caption-top table table-sm table-striped small">
+<caption>CMB ν by treatment cell</caption>
+<thead>
+<tr class="header">
+<th style="text-align: left;">fert_temp</th>
+<th style="text-align: left;">treatment</th>
+<th style="text-align: right;">nu_hat</th>
+<th style="text-align: right;">lower</th>
+<th style="text-align: right;">upper</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td style="text-align: left;">27</td>
+<td style="text-align: left;">O27S27</td>
+<td style="text-align: right;">0.921</td>
+<td style="text-align: right;">0.508</td>
+<td style="text-align: right;">1.671</td>
+</tr>
+<tr class="even">
+<td style="text-align: left;">30</td>
+<td style="text-align: left;">O27S27</td>
+<td style="text-align: right;">0.143</td>
+<td style="text-align: right;">0.076</td>
+<td style="text-align: right;">0.271</td>
+</tr>
+<tr class="odd">
+<td style="text-align: left;">27</td>
+<td style="text-align: left;">O27S30</td>
+<td style="text-align: right;">0.947</td>
+<td style="text-align: right;">0.527</td>
+<td style="text-align: right;">1.700</td>
+</tr>
+<tr class="even">
+<td style="text-align: left;">30</td>
+<td style="text-align: left;">O27S30</td>
+<td style="text-align: right;">0.129</td>
+<td style="text-align: right;">0.069</td>
+<td style="text-align: right;">0.241</td>
+</tr>
+<tr class="odd">
+<td style="text-align: left;">27</td>
+<td style="text-align: left;">O30S27</td>
+<td style="text-align: right;">0.359</td>
+<td style="text-align: right;">0.190</td>
+<td style="text-align: right;">0.676</td>
+</tr>
+<tr class="even">
+<td style="text-align: left;">30</td>
+<td style="text-align: left;">O30S27</td>
+<td style="text-align: right;">0.136</td>
+<td style="text-align: right;">0.074</td>
+<td style="text-align: right;">0.249</td>
+</tr>
+<tr class="odd">
+<td style="text-align: left;">27</td>
+<td style="text-align: left;">O30S30</td>
+<td style="text-align: right;">1.663</td>
+<td style="text-align: right;">0.936</td>
+<td style="text-align: right;">2.955</td>
+</tr>
+<tr class="even">
+<td style="text-align: left;">30</td>
+<td style="text-align: left;">O30S30</td>
+<td style="text-align: right;">0.303</td>
+<td style="text-align: right;">0.168</td>
+<td style="text-align: right;">0.548</td>
+</tr>
+</tbody>
+</table>
+</div>
+</div>
+<p>CMB sees a clean two-temperature story. Every warm-fertilization cell is strongly overdispersed, with ν between 0.13 and 0.30 and CIs nowhere near 1. The control cells are quieter: two are statistically binomial, one (O30S27) is clearly overdispersed, and one (O30S30, the double-primed condition) has a point estimate of ν ≈ 1.66 with a CI that just brushes 1. That last cell is exactly the underdispersion the paper noticed in the discussion. CMB does not formally call it significant at the 95% level, but it sees the direction the authors described, and it puts numbers on it.</p>
+<p>A picture of the CMB ν surface:</p>
+<div class="cell">
+<details class="code-fold">
+<summary>Show code</summary>
+<div class="sourceCode cell-code" id="cb22" style="background: #f1f3f5;"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb22-1">cmb_nu_tbl <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">cmb_nu_by_cell</span>(fits<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">$</span>cmb_by_treat<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">$</span>fit, disp_grid)</span>
+<span id="cb22-2"></span>
+<span id="cb22-3"><span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">ggplot</span>(cmb_nu_tbl,</span>
+<span id="cb22-4">       <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">aes</span>(<span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">x =</span> nu_hat, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">y =</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">interaction</span>(treatment, fert_temp, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">sep =</span> <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">" | "</span>),</span>
+<span id="cb22-5">           <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">color =</span> fert_temp)) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">+</span></span>
+<span id="cb22-6">  <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">geom_vline</span>(<span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">xintercept =</span> <span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">1</span>, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">linetype =</span> <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"dashed"</span>, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">color =</span> <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"grey45"</span>) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">+</span></span>
+<span id="cb22-7">  <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">geom_pointrange</span>(<span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">aes</span>(<span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">xmin =</span> lower, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">xmax =</span> upper), <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">linewidth =</span> <span class="fl" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">0.8</span>) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">+</span></span>
+<span id="cb22-8">  <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">scale_x_log10</span>() <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">+</span></span>
+<span id="cb22-9">  <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">scale_color_manual</span>(<span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">values =</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">c</span>(<span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"27"</span> <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">=</span> <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"#2c7bb6"</span>, <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"30"</span> <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">=</span> <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"#d7191c"</span>),</span>
+<span id="cb22-10">                     <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">name =</span> <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"Fertilization °C"</span>) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">+</span></span>
+<span id="cb22-11">  <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">labs</span>(<span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">x =</span> <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"CMB ν estimate (log scale, with 95% CI)"</span>,</span>
+<span id="cb22-12">       <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">y =</span> <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"Treatment | Fert °C"</span>,</span>
+<span id="cb22-13">       <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">title =</span> <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"CMB dispersion structure on the coral data"</span>)</span></code></pre></div>
+</details>
+<div class="cell-output-display">
+<div class="quarto-figure quarto-figure-center">
+<figure class="figure">
+<p><img src="https://jbogomolovas2.github.io/Julius-s-Blog/posts/CMB_regression/index_files/figure-html/coral-nu-plot-1.png" class="img-fluid figure-img" width="960"></p>
+<figcaption>CMB ν by treatment, with 95% confidence intervals. All warm-fertilization cells (red) are clearly overdispersed. Control-fertilization cells (blue) straddle binomial, with O30S30 hinting at underdispersion.</figcaption>
+</figure>
+</div>
+</div>
+</div>
+</section>
+<section id="confidence-intervals-on-what-we-actually-care-about" class="level3">
+<h3 class="anchored" data-anchor-id="confidence-intervals-on-what-we-actually-care-about">Confidence intervals on what we actually care about</h3>
+<p>The dispersion table is the methodological finding. The biological question is “by how much does each priming strategy raise fertilization success at warm temperature, and how confident are we in that number?” That is the marginal-mean question, and the answer depends on the dispersion model.</p>
+<div class="cell">
+<details class="code-fold">
+<summary>Show code</summary>
+<div class="sourceCode cell-code" id="cb23" style="background: #f1f3f5;"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb23-1">em_tables <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">list</span>()</span>
+<span id="cb23-2"><span class="cf" style="color: #003B4F;
+background-color: null;
+font-weight: bold;
+font-style: inherit;">for</span> (m <span class="cf" style="color: #003B4F;
+background-color: null;
+font-weight: bold;
+font-style: inherit;">in</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">c</span>(<span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"binomial"</span>, <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"cmb_by_treat"</span>)) {</span>
+<span id="cb23-3">  f <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> fits[[m]]<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">$</span>fit</span>
+<span id="cb23-4">  <span class="cf" style="color: #003B4F;
+background-color: null;
+font-weight: bold;
+font-style: inherit;">if</span> (<span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">is.null</span>(f)) <span class="cf" style="color: #003B4F;
+background-color: null;
+font-weight: bold;
+font-style: inherit;">next</span></span>
+<span id="cb23-5">  em <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">emmeans</span>(f, <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">~</span> fert_temp <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">*</span> treatment,</span>
+<span id="cb23-6">                <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">at =</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">list</span>(<span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">time =</span> <span class="fl" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">1.25</span>),</span>
+<span id="cb23-7">                <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">type =</span> <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"response"</span>)</span>
+<span id="cb23-8">  em_tables[[m]] <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">as.data.frame</span>(em) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">|&gt;</span></span>
+<span id="cb23-9">    dplyr<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">::</span><span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">mutate</span>(<span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">model =</span> m, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">ci_width =</span> asymp.UCL <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">-</span> asymp.LCL)</span>
+<span id="cb23-10">}</span></code></pre></div>
+</details>
+<div class="cell-output cell-output-stderr">
+<pre><code>NOTE: Results may be misleading due to involvement in interactions
+NOTE: Results may be misleading due to involvement in interactions</code></pre>
+</div>
+<details class="code-fold">
+<summary>Show code</summary>
+<div class="sourceCode cell-code" id="cb25" style="background: #f1f3f5;"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb25-1">dplyr<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">::</span><span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">bind_rows</span>(em_tables) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">|&gt;</span></span>
+<span id="cb25-2">  dplyr<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">::</span><span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">select</span>(model, fert_temp, treatment, ci_width) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">|&gt;</span></span>
+<span id="cb25-3">  tidyr<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">::</span><span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">pivot_wider</span>(<span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">names_from =</span> model, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">values_from =</span> ci_width,</span>
+<span id="cb25-4">                     <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">names_prefix =</span> <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"ci_"</span>) <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">|&gt;</span></span>
+<span id="cb25-5">  knitr<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">::</span><span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">kable</span>(<span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">digits =</span> <span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">4</span>,</span>
+<span id="cb25-6">               <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">caption =</span> <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"95% CI widths on the marginal predicted rate per cell"</span>)</span></code></pre></div>
+</details>
+<div class="cell-output-display">
+<table class="caption-top table table-sm table-striped small">
+<caption>95% CI widths on the marginal predicted rate per cell</caption>
+<thead>
+<tr class="header">
+<th style="text-align: left;">fert_temp</th>
+<th style="text-align: left;">treatment</th>
+<th style="text-align: right;">ci_binomial</th>
+<th style="text-align: right;">ci_cmb_by_treat</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td style="text-align: left;">27</td>
+<td style="text-align: left;">O27S27</td>
+<td style="text-align: right;">0.0224</td>
+<td style="text-align: right;">0.0168</td>
+</tr>
+<tr class="even">
+<td style="text-align: left;">30</td>
+<td style="text-align: left;">O27S27</td>
+<td style="text-align: right;">0.0485</td>
+<td style="text-align: right;">0.0690</td>
+</tr>
+<tr class="odd">
+<td style="text-align: left;">27</td>
+<td style="text-align: left;">O27S30</td>
+<td style="text-align: right;">0.0220</td>
+<td style="text-align: right;">0.0162</td>
+</tr>
+<tr class="even">
+<td style="text-align: left;">30</td>
+<td style="text-align: left;">O27S30</td>
+<td style="text-align: right;">0.0594</td>
+<td style="text-align: right;">0.0887</td>
+</tr>
+<tr class="odd">
+<td style="text-align: left;">27</td>
+<td style="text-align: left;">O30S27</td>
+<td style="text-align: right;">0.0313</td>
+<td style="text-align: right;">0.0352</td>
+</tr>
+<tr class="even">
+<td style="text-align: left;">30</td>
+<td style="text-align: left;">O30S27</td>
+<td style="text-align: right;">0.0531</td>
+<td style="text-align: right;">0.0689</td>
+</tr>
+<tr class="odd">
+<td style="text-align: left;">27</td>
+<td style="text-align: left;">O30S30</td>
+<td style="text-align: right;">0.0296</td>
+<td style="text-align: right;">0.0163</td>
+</tr>
+<tr class="even">
+<td style="text-align: left;">30</td>
+<td style="text-align: left;">O30S30</td>
+<td style="text-align: right;">0.0410</td>
+<td style="text-align: right;">0.0409</td>
+</tr>
+</tbody>
+</table>
+</div>
+</div>
+<p>The CMB CIs adjust the binomial baseline up where the data are overdispersed and down where they are not. Warm-fertilization cells widen by 30 to 50 percent relative to binomial, with one exception: O30S30 at warm has the mildest overdispersion of the four warm cells (ν ≈ 0.30, closest to binomial) and ends up at essentially the binomial width. Control cells either widen slightly (O30S27, the one clearly overdispersed control cell) or tighten below binomial. The O30S30 cell at control is the cleanest example: binomial 0.030, CMB 0.016, almost half.</p>
+<p>That asymmetric correction is the practical payoff. Dispersion is not just a parameter we estimate, it shifts how confident we are in every cell-level rate, in the right direction for each cell.</p>
+</section>
+<section id="sharpening-the-biological-finding" class="level3">
+<h3 class="anchored" data-anchor-id="sharpening-the-biological-finding">Sharpening the biological finding</h3>
+<p>With dispersion correctly modeled, we can ask the question the original paper asked, but with calibrated standard errors. At warm fertilization (30°C), which priming strategy works?</p>
+<div class="cell">
+<details class="code-fold">
+<summary>Show code</summary>
+<div class="sourceCode cell-code" id="cb26" style="background: #f1f3f5;"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb26-1">em_30 <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">&lt;-</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">emmeans</span>(fits<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">$</span>cmb_by_treat<span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">$</span>fit, <span class="sc" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">~</span> treatment,</span>
+<span id="cb26-2">                 <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">at =</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">list</span>(<span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">fert_temp =</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">factor</span>(<span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">30</span>, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">levels =</span> <span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">c</span>(<span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">27</span>, <span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">30</span>)),</span>
+<span id="cb26-3">                           <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">time      =</span> <span class="fl" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">1.25</span>))</span></code></pre></div>
+</details>
+<div class="cell-output cell-output-stderr">
+<pre><code>NOTE: Results may be misleading due to involvement in interactions</code></pre>
+</div>
+<details class="code-fold">
+<summary>Show code</summary>
+<div class="sourceCode cell-code" id="cb28" style="background: #f1f3f5;"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb28-1"><span class="fu" style="color: #4758AB;
+background-color: null;
+font-style: inherit;">pairs</span>(em_30, <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">adjust =</span> <span class="st" style="color: #20794D;
+background-color: null;
+font-style: inherit;">"tukey"</span>)</span></code></pre></div>
+</details>
+<div class="cell-output cell-output-stdout">
+<pre><code> contrast        estimate    SE  df z.ratio p.value
+ O27S27 - O27S30   0.3861 0.152 Inf   2.541  0.0538
+ O27S27 - O30S27   0.3062 0.137 Inf   2.235  0.1139
+ O27S27 - O30S30  -0.2651 0.127 Inf  -2.087  0.1573
+ O27S30 - O30S27  -0.0799 0.142 Inf  -0.563  0.9430
+ O27S30 - O30S30  -0.6513 0.132 Inf  -4.922  &lt;.0001
+ O30S27 - O30S30  -0.5714 0.115 Inf  -4.974  &lt;.0001
+
+Results are given on the log odds ratio (not the response) scale. 
+P value adjustment: tukey method for comparing a family of 4 estimates </code></pre>
+</div>
+</div>
+<p>Three things sit in that table. First, double-priming (O30S30) significantly outperforms each single-priming strategy, both contrasts at p &lt; 0.0001 with effect sizes near 0.6 on the log-odds scale. Second, double-priming does not significantly beat no priming (p = 0.16). Third, single-priming does not improve on no priming either; the O27S27 vs O27S30 contrast is even marginally significant in the wrong direction (p = 0.054), meaning no priming was slightly better than priming sperm alone.</p>
+<p>This sharpens the paper’s conclusion. The original analysis said priming helps and double-priming helps most. The CMB-calibrated version says something more pointed: you have to prime <em>both</em> gametes. Single-priming does not significantly outperform no priming, and may even be marginally worse. The only thing that lets us make that claim cleanly is calibrated uncertainty on each contrast, which required the right dispersion model.</p>
+<p>The variability hint in the paper’s discussion now has both halves: priming both gametes restored the mean and the consistency of fertilization, and we can put numbers on each.</p>
+</section>
+</section>
+<section id="when-to-use-what" class="level2">
+<h2 class="anchored" data-anchor-id="when-to-use-what">When to use what</h2>
+<p>CMB is not the answer to every proportion-regression problem.</p>
+<p>If your data are clearly overdispersed and the dispersion looks roughly constant across groups, use beta-binomial. It is faster, well-supported, and what your reviewers will expect.</p>
+<p>If your counts are nominally bounded but rarely come near the bound, and the dispersion goes in only one direction, CMP with an offset is a defensible workaround. This is the situation I originally had, and it works fine until you ask it to simulate.</p>
+<p>If your counts can hit the bound, the dispersion is heterogeneous across groups, or you suspect any sub-binomial variance in any subgroup, CMB is the right tool. The standard alternatives fail in this regime in ways that are hard to detect unless you specifically look for them.</p>
+<p>A few warning signs:</p>
+<ul>
+<li>Your binomial residuals show clear structure (cells systematically over or under predicted relative to binomial expectation).</li>
+<li>Variance ratios (observed variance over binomial expectation) differ across subgroups, or cross 1.</li>
+<li>A Pearson chi-square comes in well below the residual degrees of freedom.</li>
+<li>A beta-binomial with per-group dispersion fails to converge, or pegs rho near zero in some groups but clearly above zero in others.</li>
+</ul>
+<p>Any one of these is a hint that the family you are using cannot describe what the data are doing.</p>
+</section>
+<section id="bottom-line" class="level2">
+<h2 class="anchored" data-anchor-id="bottom-line">Bottom line</h2>
+<p>For bounded count data, the binomial baseline is correct only when the data are well-behaved. Real data often are not. The standard upgrade path is beta-binomial, but BB can only ever inflate variance above binomial. When the data want sub-binomial variance, BB hits its <code>rho &gt;= 0</code> wall, sometimes silently, sometimes by refusing to converge.</p>
+<p>CMB fixes this. It is the binomial analogue of CMP, it covers both dispersion directions through a single ν parameter, and it respects the upper bound by construction. With the implementation linked below it slots into the standard <code>glmmTMB</code> workflow.</p>
+<p>The coral example showed what this buys you on a real study: a sharper biological claim than the original analysis could make, with properly calibrated intervals on each contrast. The dispersion structure the authors had only described qualitatively is now an estimable, testable feature of the fit.</p>
+</section>
+<section id="getting-cmb-in-your-r-session" class="level2">
+<h2 class="anchored" data-anchor-id="getting-cmb-in-your-r-session">Getting CMB in your R session</h2>
+<p>The CMB family is not on CRAN. For now it lives on two public forks:</p>
+<ul>
+<li>TMB side, the auto-differentiable likelihood: <a href="https://github.com/jbogomolovas2/adcomp/tree/cmb-family">github.com/jbogomolovas2/adcomp@cmb-family</a></li>
+<li>glmmTMB side, the formula interface: <a href="https://github.com/jbogomolovas2/glmmTMB/tree/cmb-family">github.com/jbogomolovas2/glmmTMB@cmb-family</a></li>
+</ul>
+<p>Install both with the snippet above, write <code>family = compbinomial</code> in your <code>glmmTMB()</code> call, and the rest is the standard workflow you already know. Issues and pull requests are welcome on either fork. If <code>compbinomial</code> ends up useful for your work I would be glad to hear about it.</p>
+</section>
+<section id="acknowledgements" class="level2">
+<h2 class="anchored" data-anchor-id="acknowledgements">Acknowledgements</h2>
+<p>This post stands on a lot of other people’s code. The CMB distribution work by <span class="citation" data-cites="kadane2016cmb">(Kadane 2016)</span> and the COMMultReg package by Andrew Raim <span class="citation" data-cites="COMMultReg">(Raim, n.d.)</span> provided the distribution-level reference implementation that I checked the TMB-side density against. The mean parameterization follows the pattern Huang <span class="citation" data-cites="huang2017meanCMP">(Huang 2017)</span> introduced for CMP. TMB <span class="citation" data-cites="kristensen2016TMB">(Kristensen et al. 2016)</span> handled the automatic differentiation that made the inner Newton solve tractable, and glmmTMB <span class="citation" data-cites="brooks2017glmmTMB">(Brooks et al. 2017)</span> provided the family-dispatch and dispformula machinery that the CMB family slots into. The coral data is from Puisay et al. <span class="citation" data-cites="puisay2024coral">(Puisay et al. 2024)</span>, archived openly on Zenodo <span class="citation" data-cites="puisay2024coral_data">(Puisay et al. 2023)</span>, which is what made the real-data demonstration possible. R package citations were generated with <code>grateful</code> <span class="citation" data-cites="grateful">(Rodrı́guez-Sánchez, n.d.)</span>.</p>
+</section>
+<section id="references" class="level1">
+<h1>References</h1>
+<div id="refs" class="references csl-bib-body hanging-indent" data-entry-spacing="0">
+<div id="ref-brooks2017glmmTMB" class="csl-entry">
+Brooks, Mollie E., Kasper Kristensen, Koen J. van Benthem, Arni Magnusson, Casper W. Berg, Anders Nielsen, Hans J. Skaug, Martin Mächler, and Benjamin M. Bolker. 2017. <span>“<span class="nocase">glmmTMB</span> Balances Speed and Flexibility Among Packages for Zero-Inflated Generalized Linear Mixed Models.”</span> <em>The R Journal</em> 9 (2): 378–400. <a href="https://doi.org/10.32614/RJ-2017-066">https://doi.org/10.32614/RJ-2017-066</a>.
+</div>
+<div id="ref-huang2017meanCMP" class="csl-entry">
+Huang, Alan. 2017. <span>“Mean-Parametrized <span>Conway–Maxwell–Poisson</span> Regression Models for Dispersed Counts.”</span> <em>Statistical Modelling</em> 17 (6): 359–80. <a href="https://doi.org/10.1177/1471082X17697749">https://doi.org/10.1177/1471082X17697749</a>.
+</div>
+<div id="ref-kadane2016cmb" class="csl-entry">
+Kadane, Joseph B. 2016. <span>“Sums of Possibly Associated <span>B</span>ernoulli Variables: The <span class="nocase">Conway-Maxwell-binomial</span> Distribution.”</span> <em>Bayesian Analysis</em> 11 (2): 403–20. <a href="https://doi.org/10.1214/15-BA955">https://doi.org/10.1214/15-BA955</a>.
+</div>
+<div id="ref-kristensen2016TMB" class="csl-entry">
+Kristensen, Kasper, Anders Nielsen, Casper W. Berg, Hans Skaug, and Bradley M. Bell. 2016. <span>“<span>TMB</span>: Automatic Differentiation and <span>Laplace</span> Approximation.”</span> <em>Journal of Statistical Software</em> 70 (5): 1–21. <a href="https://doi.org/10.18637/jss.v070.i05">https://doi.org/10.18637/jss.v070.i05</a>.
+</div>
+<div id="ref-puisay2024coral_data" class="csl-entry">
+Puisay, Antoine, Laetitia Hédouin, Rosanne Pilon, Claire Goiran, and Benoit Pujol. 2023. <span>“Data for: How Thermal Priming of Coral Gametes Shapes Fertilization Success.”</span> Zenodo. <a href="https://doi.org/10.5281/zenodo.8032394">https://doi.org/10.5281/zenodo.8032394</a>.
+</div>
+<div id="ref-puisay2024coral" class="csl-entry">
+———. 2024. <span>“How Thermal Priming of Coral Gametes Shapes Fertilization Success.”</span> <em>Journal of Experimental Marine Biology and Ecology</em>. <a href="https://doi.org/10.1016/j.jembe.2023.151953">https://doi.org/10.1016/j.jembe.2023.151953</a>.
+</div>
+<div id="ref-COMMultReg" class="csl-entry">
+Raim, Andrew M. n.d. <em><span>COMMultReg</span>: <span>Conway–Maxwell</span> Multinomial Regression</em>. <a href="https://github.com/andrewraim/COMMultReg">https://github.com/andrewraim/COMMultReg</a>.
+</div>
+<div id="ref-grateful" class="csl-entry">
+Rodrı́guez-Sánchez, Francisco. n.d. <em><span class="nocase">grateful</span>: Facilitate Citation of <span>R</span> Packages</em>. <a href="https://pakillo.github.io/grateful/">https://pakillo.github.io/grateful/</a>.
+</div>
+</div>
+
+
+</section>
+
+ ]]></description>
+  <category>R</category>
+  <category>GLM</category>
+  <category>GLMM</category>
+  <category>Count Regression</category>
+  <category>CMB</category>
+  <category>Biometrics</category>
+  <guid>https://jbogomolovas2.github.io/Julius-s-Blog/posts/CMB_regression/</guid>
+  <pubDate>Sun, 24 May 2026 07:00:00 GMT</pubDate>
+  <media:content url="https://jbogomolovas2.github.io/Julius-s-Blog/posts/CMB_regression/corals.png" medium="image" type="image/png" height="81" width="144"/>
+</item>
 <item>
   <title>Conway–Maxwell–Poisson vs Welch’s t-test for proliferation count data</title>
   <dc:creator>Julius Bogomolovas</dc:creator>

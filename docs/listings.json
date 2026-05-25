@@ -4,6 +4,7 @@
     "items": [
       "/posts/sentiment_analysis/index.html",
       "/posts/cherry_post/index.html",
+      "/posts/CMB_regression/index.html",
       "/posts/comparison/index.html",
       "/posts/steps/index.html",
       "/posts/post-with-code/index.html",
@@ -14,6 +15,7 @@
   {
     "listing": "/index.html",
     "items": [
+      "/posts/CMB_regression/index.html",
       "/posts/comparison/index.html",
       "/posts/sentiment_analysis/index.html",
       "/posts/steps/index.html",
